@@ -1,1 +1,1 @@
-{"allocations": {"SGOV": 20.0, "SOXL": 15.0, "TQQQ": 15.0, "IBIT": 12.5, "DFEN": 12.5, "IAU": 8.0, "DBMF": 7.0, "URNM": 5.0, "BITX": 2.5, "VXX": 2.5}, "frequency": 1, "name": "", "period": "days"}
+{"allocations": {"SGOV": 100.0}, "frequency": 1, "name": "", "period": "days"}
