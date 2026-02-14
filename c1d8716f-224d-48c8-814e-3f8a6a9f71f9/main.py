@@ -1,23 +1,202 @@
-from surmount.base_class import Strategy, TargetAllocation, backtest
-from surmount.logging import log
+import pandas as pd
+import numpy as np
 
-class TradingStrategy(Strategy):
-    def __init__(self):
-        self.tickers = ["AAPL", "TSLA", "SPY"]
-        self.weights = [30, 30, 30]
-        self.count = 0
+# ---------------------------------------------------------
+# STRATEGY CONFIGURATION (Final "Nitro-Rotator" Build)
+# ---------------------------------------------------------
+# The "Target 100k" Universe (Aggressive)
+NITRO_ASSETS = ["SOXL", "FNGU", "DFEN", "UCO", "SILJ", "URNM", "IBIT"]
 
-    @property
-    def interval(self):
-        return "1day"
+# The "Safety Trinity" (Defensive Shield)
+SAFETY_ASSETS = ["SGOV", "IAU", "DBMF"]
 
-    @property
-    def assets(self):
-        return self.tickers
+# The Market Regime Trigger
+TRIGGER_ASSET = "VIXY"
 
-    def run(self, data):
-        self.count += 1
-        if (self.count % 30 == 1):
-            allocation_dict = {self.tickers[i]: self.weights[i]/sum(self.weights) for i in range(len(self.tickers))}
-            return TargetAllocation(allocation_dict)
-        return None
+# Strategy Parameters
+RISK_OFF_LOOKBACK = 5 # 5-day MA for VIXY Trigger (Fast Reaction)
+MOMENTUM_LOOKBACK = 40 # 40-day Return for Nitro Selection (Aggressive Entry)
+SAFETY_LOOKBACK = 60 # 60-day Return for Safety Selection (Stable Defense)
+RUNNER_TREND_LOOKBACK = 50 # 50-day SMA (Trend Floor for the Runner)
+
+# Risk Management & Profit Taking
+ATR_PERIOD = 14
+ATR_MULTIPLIER = 2.0 # Stage 1: Initial Stop width (Wide)
+PROFIT_TARGET = 0.20 # +20% Gain triggers the "Bank & Tighten" logic
+TIGHT_STOP_PCT = 0.03 # Stage 2: 3% Trailing Stop (Tight)
+
+# ---------------------------------------------------------
+# INITIALIZATION
+# ---------------------------------------------------------
+def initialize(context):
+    """
+    Called once at the start. Sets up the asset universes and tracking variables.
+    """
+    context.nitro_universe = [symbol(s) for s in NITRO_ASSETS]
+    context.safety_universe = [symbol(s) for s in SAFETY_ASSETS]
+    context.trigger = symbol(TRIGGER_ASSET)
+    
+    # Tracking Dictionaries for "Virtual Stops"
+    context.entry_prices = {}    
+    context.highest_prices = {} # Tracks the "High Water Mark" for trailing stops
+    context.stages = {} # Tracks if position is Stage 1 (New) or Stage 2 (Runner)
+
+    # Set Benchmark
+    set_benchmark(symbol("SPY"))
+    log("Nitro-Rotator Initialized. Target: $100k. Timeframe: 5-Min.")
+
+# ---------------------------------------------------------
+# MAIN LOGIC LOOP (5-Minute Execution)
+# ---------------------------------------------------------
+def handle_data(context, data):
+    """
+    Called every interval. We execute logic based on the "Traffic Light" system.
+    """
+    # 1. THE 5-MINUTE GATEKEEPER
+    # We check the current time. If it's not a 5-minute interval, we skip.
+    current_time = data.current_dt
+    if current_time.minute % 5 != 0:
+        return
+
+    # -----------------------------------------------------
+    # 2. THE TRAFFIC LIGHT (Market Regime Check)
+    # -----------------------------------------------------
+    hist_vix = data.history(context.trigger, "close", RISK_OFF_LOOKBACK + 5, "1d")
+    
+    if len(hist_vix) < RISK_OFF_LOOKBACK:
+        return # Not enough data yet
+        
+    vix_current = hist_vix.iloc[-1]
+    vix_ma = hist_vix[-RISK_OFF_LOOKBACK:].mean()
+    
+    # LOGIC: If Current VIX > 5-day MA, we are RISK-OFF (Red Light).
+    is_risk_off = vix_current > vix_ma
+
+    if is_risk_off:
+        execute_safety_protocol(context, data)
+    else:
+        execute_nitro_engine(context, data)
+
+# ---------------------------------------------------------
+# EXECUTION MODULES
+# ---------------------------------------------------------
+def execute_safety_protocol(context, data):
+    """
+    Risk-Off Logic: Close all Nitro positions, Buy Top 1 Safety Asset.
+    """
+    # 1. Panic Button: Close all Nitro positions
+    for asset in context.nitro_universe:
+        if data.portfolio.positions[asset].amount > 0:
+            order_target_percent(asset, 0)
+            clean_tracker(context, asset) # Reset trackers
+            log(f"RISK OFF: Closing {asset.symbol}")
+
+    # 2. Rank Safety Assets by 60d Stability
+    scores = {}
+    for asset in context.safety_universe:
+        hist = data.history(asset, "close", SAFETY_LOOKBACK + 5, "1d")
+        if len(hist) > SAFETY_LOOKBACK:
+            # Simple Return: (Price / Price_60_days_ago) - 1
+            scores[asset] = (hist.iloc[-1] / hist.iloc[0]) - 1
+    
+    # 3. Buy Top 1 Safety Asset
+    if scores:
+        best_safety = max(scores, key=scores.get)
+        
+        # Only trade if we aren't already 100% in this asset
+        curr_val = data.portfolio.positions[best_safety].amount
+        if curr_val == 0:
+            # Close other safety assets first
+            for s_asset in context.safety_universe:
+                if s_asset != best_safety and data.portfolio.positions[s_asset].amount > 0:
+                    order_target_percent(s_asset, 0)
+            
+            # Go 100% into the shield
+            order_target_percent(best_safety, 1.0)
+            log(f"DEFENSE: Buying 100% {best_safety.symbol}")
+
+def execute_nitro_engine(context, data):
+    """
+    Risk-On Logic: Manage Stops, Take Profit, and Hunt for New Leaders.
+    """
+    # 1. Close Safety Positions (if any exist)
+    for asset in context.safety_universe:
+        if data.portfolio.positions[asset].amount > 0:
+            order_target_percent(asset, 0)
+            log(f"RISK ON: Selling Defense {asset.symbol}")
+
+    # 2. MANAGE EXISTING POSITIONS (The "Ratchet" Logic)
+    current_holdings = [pos for pos in context.portfolio.positions if context.portfolio.positions[pos].amount > 0 and pos in context.nitro_universe]
+    
+    for asset in current_holdings:
+        current_price = data.current(asset, "close")
+        qty = context.portfolio.positions[asset].amount
+        
+        # Initialize trackers if missing (safeguard)
+        if asset not in context.entry_prices:
+            context.entry_prices[asset] = context.portfolio.positions[asset].cost_basis
+            context.highest_prices[asset] = current_price
+            context.stages[asset] = 1 # Stage 1 = Initial Holding
+        
+        # Update High Water Mark
+        if current_price > context.highest_prices[asset]:
+            context.highest_prices[asset] = current_price
+            
+        # --- LOGIC A: CHECK PROFIT TAKING (+20%) ---
+        pnl_pct = (current_price / context.entry_prices[asset]) - 1
+        
+        if context.stages[asset] == 1 and pnl_pct >= PROFIT_TARGET:
+            # HIT +20% GAIN -> SELL 1/3
+            log(f"PROFIT TAKE: {asset.symbol} hit +20%. Selling 1/3 and Tightening Stop.")
+            
+            qty_to_sell = int(qty * 0.33)
+            order(asset, -qty_to_sell)
+            
+            # Move to Stage 2 (The Runner)
+            context.stages[asset] = 2 
+            
+        # --- LOGIC B: CHECK STOP LOSS ---
+        stop_price = 0.0
+        
+        if context.stages[asset] == 1:
+            # Stage 1: Wide 2x ATR Stop
+            atr = calculate_atr(data, asset, ATR_PERIOD)
+            stop_price = context.highest_prices[asset] - (ATR_MULTIPLIER * atr)
+            
+        elif context.stages[asset] == 2:
+            # Stage 2: Tight 3% Trailing Stop
+            stop_price = context.highest_prices[asset] * (1.0 - TIGHT_STOP_PCT)
+                
+        # Execute Stop
+        if stop_price > 0 and current_price < stop_price:
+            log(f"STOP LOSS: {asset.symbol} hit stop at {current_price} (Stop: {stop_price:.2f}). Closing.")
+            order_target_percent(asset, 0)
+            clean_tracker(context, asset)
+
+    # 3. HUNT FOR NEW POSITIONS (The "Rotator")
+    # If we have cash > 10%, hunt for the next best asset
+    cash_weight = context.portfolio.cash / context.portfolio.portfolio_value
+    
+    if cash_weight > 0.10:
+        scores = {}
+        for asset in context.nitro_universe:
+            # Anti-Churn: EXCLUDE assets we already hold
+            if data.portfolio.positions[asset].amount > 0:
+                continue
+                
+            hist = data.history(asset, "close", MOMENTUM_LOOKBACK + 5, "1d")
+            if len(hist) > MOMENTUM_LOOKBACK:
+                # 40-day Cumulative Return
+                scores[asset] = (hist.iloc[-1] / hist.iloc[0]) - 1
+        
+        if scores:
+            best_asset = max(scores, key=scores.get)
+            log(f"HUNTING: Buying {best_asset.symbol} with available cash. Score: {scores[best_asset]:.2f}")
+            
+            # Buy with 95% of available cash
+            amount_to_buy = context.portfolio.cash * 0.95
+            order_value(best_asset, amount_to_buy)
+            
+            # Initialize Tracker for new buy
+            context.entry_prices[best_asset] = data.current(best_asset, "close")
+            context
