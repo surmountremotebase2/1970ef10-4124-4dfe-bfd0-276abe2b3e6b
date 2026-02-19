@@ -9,9 +9,9 @@ class TradingStrategy(Strategy):
         # ACTION: Swapped SILJ (Miners) -> AGQ (2x Silver Bullion).
         # REASON: SILJ caused $25k loss due to equity risk/churn. AGQ tracks metal spot price.
         # LOGIC: "Entry-Only Governor" (Winners Run, Losers Blocked).
-        
+       
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU", "AGQ"]
-        
+       
         self.safety = ["SGOV", "IAU", "DBMF"]
         self.vixy = "VXX"
         self.spy = "SPY"
@@ -20,9 +20,9 @@ class TradingStrategy(Strategy):
         self.vix_ma_len = 390 # 5 Days (390 * 5min)
         self.mom_len = 40 # Momentum Window (40 * 5min)
         self.trend_len = 156 # SPY Trend (2 Days)
-        self.lockout_duration = 12 # 60 Minutes (Reduced from 3.5 hrs to prevent paralysis)
-        self.atr_period = 78 # 1 Full Day (Increased from 14 to prevent whipsaw)
-        
+        self.lockout_duration = 39 # 3.5 Hours
+        self.atr_period = 14
+       
         self.system_lockout_counter = 0
         self.primary_asset = None
         self.entry_price = None
@@ -54,29 +54,15 @@ class TradingStrategy(Strategy):
 
     def calculate_momentum(self, history, length):
         if len(history) >= length:
-            # Volatility-Adjusted Momentum to level the playing field
-            closes = [x["close"] for x in history[-length:]]
-            total_return = (closes[-1] / closes[0]) - 1
-            
-            # Calculate the standard deviation of the percentage changes
-            df = pd.Series(closes)
-            pct_change = df.pct_change().dropna()
-            volatility = pct_change.std()
-            
-            # Prevent division by zero if an asset flatlines
-            if volatility == 0 or np.isnan(volatility):
-                return -999
-                
-            # Return the volatility-adjusted score
-            return total_return / volatility
+            return (history[-1]["close"] / history[-length]["close"]) - 1
         return -999
 
     def run(self, data):
         d = data["ohlcv"]
         if not d: return None
-        
+       
         if not self.debug_printed:
-            log(f"NITRO K: AGQ Active. Normalized Momentum. 78-bar ATR.")
+            log(f"NITRO K: AGQ Active. Entry-Only Governor. Winners Allowed to Run.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK (Churn Protection)
@@ -121,7 +107,7 @@ class TradingStrategy(Strategy):
             curr = p_hist[-1]["close"]
             self.peak_price = max(self.peak_price, curr)
             atr = self.calculate_atr(p_hist) or (curr * 0.02)
-            
+           
             # STOP LOSS (4.5x) or TRAILING STOP (8.0x)
             if curr <= self.entry_price - (4.5 * atr) or curr <= self.peak_price - (8.0 * atr):
                 log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
