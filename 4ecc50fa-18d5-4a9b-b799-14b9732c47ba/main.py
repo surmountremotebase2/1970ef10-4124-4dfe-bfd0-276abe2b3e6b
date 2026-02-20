@@ -5,10 +5,10 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (SYNTHETIC 15-MIN + 50/50 SPLIT) ---
-        # TIMEFRAME FIX: Interval set to 5m for platform compatibility.
-        # LOGIC: Gated to execute only every 15 minutes to eliminate whipsaw.
-        # WEIGHTING: Resilient 50/50 allocation split.
+        # --- NITRO SERIES K (SYNTHETIC 15-MIN + 50/50 SPLIT + DRIFT) ---
+        # TIMEFRAME FIX: Interval 5m. Gated to execute every 15 minutes.
+        # WEIGHTING: Resilient 50/50 split. 
+        # FIX: 'return None' implemented to stop micro-rebalancing and let winners run.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
@@ -17,10 +17,10 @@ class TradingStrategy(Strategy):
         self.spy = "SPY"
 
         # --- PARAMETERS (5-Minute Base Math) ---
-        self.vix_ma_len = 390 # 5 Days
-        self.mom_len = 40 # Momentum Window
-        self.trend_len = 156 # 2 Days
-        self.lockout_duration = 39 # 3.5 Hours
+        self.vix_ma_len = 390 
+        self.mom_len = 40 
+        self.trend_len = 156 
+        self.lockout_duration = 39 
         self.atr_period = 14 
         
         self.system_lockout_counter = 0
@@ -30,13 +30,11 @@ class TradingStrategy(Strategy):
         self.debug_printed = False
         self.vxx_shield_active = False
         
-        # --- SYNTHETIC 15m VARIABLES ---
         self.bar_counter = 0
         self.current_alloc = {"SGOV": 1.0}
 
     @property
     def interval(self):
-        # Kept at 5min to bypass platform limitations
         return "5min"
 
     @property
@@ -70,18 +68,20 @@ class TradingStrategy(Strategy):
         self.bar_counter += 1
         
         if not self.debug_printed:
-            log("NITRO K: Synthetic 15-Min Engine. 50/50 Split Active.")
+            log("NITRO K: Synthetic 15-Min Engine. Drift Active.")
             self.debug_printed = True
 
         # 1. GLOBAL LOCKOUT CHECK 
         if self.system_lockout_counter > 0:
             self.system_lockout_counter -= 1
-            self.current_alloc = {"SGOV": 1.0}
-            return TargetAllocation(self.current_alloc)
+            if self.system_lockout_counter == 0:
+                self.current_alloc = {"SGOV": 1.0}
+                return TargetAllocation(self.current_alloc)
+            return None # Do nothing while locked out
 
         # --- SYNTHETIC 15-MINUTE GATEKEEPER ---
         if self.bar_counter % 3 != 0:
-            return TargetAllocation(self.current_alloc)
+            return None # Do nothing on the off-bars
 
         # --- CORE DECISION LOGIC ---
 
@@ -103,11 +103,13 @@ class TradingStrategy(Strategy):
                 log("VXX Shield DISENGAGED.")
 
             if self.vxx_shield_active:
-                self.held_assets = []
-                self.current_alloc = {"SGOV": 1.0}
-                return TargetAllocation(self.current_alloc)
+                if self.held_assets: # Only reallocate if we are actually holding something
+                    self.held_assets = []
+                    self.current_alloc = {"SGOV": 1.0}
+                    return TargetAllocation(self.current_alloc)
+                return None
 
-        # 4. SCORING & SELECTION (Top 2 for 50/50 Split)
+        # 4. SCORING & SELECTION
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in self.tickers}
         sorted_leaders = sorted(scores, key=scores.get, reverse=True)
         top_2 = [sorted_leaders[0], sorted_leaders[1]]
@@ -115,8 +117,10 @@ class TradingStrategy(Strategy):
         # A. ENTRY LOGIC
         if not self.held_assets:
             if governor_blocks_entries:
-                self.current_alloc = {"SGOV": 1.0}
-                return TargetAllocation(self.current_alloc)
+                if self.current_alloc.get("SGOV") != 1.0:
+                    self.current_alloc = {"SGOV": 1.0}
+                    return TargetAllocation(self.current_alloc)
+                return None
             
             valid_leaders = [t for t in top_2 if scores[t] > 0]
             
@@ -137,8 +141,7 @@ class TradingStrategy(Strategy):
                 log(f"ENTRY: 50/50 Split -> {l} & SGOV")
                 return TargetAllocation(self.current_alloc)
             else:
-                self.current_alloc = {"SGOV": 1.0}
-                return TargetAllocation(self.current_alloc)
+                return None
 
         # B. MANAGEMENT LOGIC
         hit_stop = False
@@ -152,16 +155,16 @@ class TradingStrategy(Strategy):
                 entry_p = self.entry_prices.get(asset, curr)
                 peak_p = self.peak_prices.get(asset, curr)
                 
-                # STOP LOSS (7.0x) or TRAILING STOP (12.0x)
                 if curr <= entry_p - (7.0 * atr) or curr <= peak_p - (12.0 * atr):
                     log(f"EXIT: {asset} Stop/Trail Hit. Lockdown Engaged.")
                     hit_stop = True
         
-        # If any asset hits its stop, the entire engine locks down
         if hit_stop:
             self.system_lockout_counter = self.lockout_duration
             self.held_assets = []
             self.current_alloc = {"SGOV": 1.0}
             return TargetAllocation(self.current_alloc)
 
-        return TargetAllocation(self.current_alloc)
+        # C. HOLD STATE (DRIFT)
+        # If no entries or exits are triggered, do absolutely nothing. 
+        return None
