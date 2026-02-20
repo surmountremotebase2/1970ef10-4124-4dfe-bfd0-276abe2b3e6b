@@ -1,14 +1,13 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
-import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (SYNTHETIC 15-MIN + PURE MOMENTUM) ---
+        # --- NITRO SERIES K (SYNTHETIC 15-MIN + TRAILING SWING LOW) ---
         # TIMEFRAME: Interval 5m. Gated to execute every 15 minutes.
         # ALLOCATION: 100% Concentrated.
-        # FIX: ATR logic completely removed. Exits driven strictly by momentum.
+        # EXITS: Price Action structural floor. SPY Governor is Entry-Only.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
@@ -16,7 +15,7 @@ class TradingStrategy(Strategy):
         self.vixy = "VXX"
         self.spy = "SPY"
 
-        # --- PARAMETERS (5-Minute Base Math) ---
+        # --- PARAMETERS ---
         self.vix_ma_len = 390 
         self.mom_len = 40 
         self.trend_len = 156 
@@ -57,7 +56,7 @@ class TradingStrategy(Strategy):
         self.bar_counter += 1
         
         if not self.debug_printed:
-            log("NITRO K: Synthetic 15-Min Engine. Pure Momentum Exits Active.")
+            log("NITRO K: 15-Min Engine. Trailing Swing Low Active.")
             self.debug_printed = True
 
         # 1. GLOBAL LOCKOUT CHECK 
@@ -74,12 +73,11 @@ class TradingStrategy(Strategy):
 
         # --- CORE DECISION LOGIC ---
 
-        # 2. GOVERNOR CHECK (Now acts as a Hard Exit too)
+        # 2. GOVERNOR CHECK (Entry-Only)
         spy_hist = self.get_history(d, self.spy)
-        spy_momentum = self.calculate_momentum(spy_hist, self.trend_len)
-        governor_negative = spy_momentum < 0
+        governor_blocks_entries = self.calculate_momentum(spy_hist, self.trend_len) < 0
 
-        # 3. VXX SHIELD (With Hysteresis Buffer)
+        # 3. VXX SHIELD (Hard Defense)
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
@@ -100,21 +98,13 @@ class TradingStrategy(Strategy):
                     return TargetAllocation(self.current_alloc)
                 return None
 
-        # Check if Governor forces an exit
-        if self.primary_asset is not None and governor_negative:
-            log(f"EXIT: SPY Governor turned negative. Liquidating {self.primary_asset}.")
-            self.system_lockout_counter = self.lockout_duration
-            self.primary_asset = None
-            self.current_alloc = {"SGOV": 1.0}
-            return TargetAllocation(self.current_alloc)
-
         # 4. SCORING & SELECTION
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in self.tickers}
         leader = sorted(scores, key=scores.get, reverse=True)[0]
 
         # A. ENTRY LOGIC
         if self.primary_asset is None:
-            if governor_negative:
+            if governor_blocks_entries:
                 if self.current_alloc.get("SGOV") != 1.0:
                     self.current_alloc = {"SGOV": 1.0}
                     return TargetAllocation(self.current_alloc)
@@ -123,21 +113,31 @@ class TradingStrategy(Strategy):
             if scores[leader] > 0:
                 self.primary_asset = leader
                 self.current_alloc = {leader: 1.0}
-                log(f"ENTRY: Pure Momentum -> {leader}")
+                entry_p = self.get_history(d, leader)[-1]["close"]
+                log(f"ENTRY: {leader} at {entry_p:.2f}")
                 return TargetAllocation(self.current_alloc)
             else:
                 return None
 
-        # B. MANAGEMENT LOGIC (Pure Momentum)
+        # B. MANAGEMENT LOGIC (Trailing Swing Low)
         if self.primary_asset is not None:
-            current_score = scores.get(self.primary_asset, -999)
+            p_hist = self.get_history(d, self.primary_asset)
             
-            # EXIT: If the asset's momentum drops below zero
-            if current_score < 0:
-                log(f"EXIT: {self.primary_asset} momentum died ({current_score:.4f}). Lockdown Engaged.")
-                self.system_lockout_counter = self.lockout_duration
-                self.primary_asset = None
-                self.current_alloc = {"SGOV": 1.0}
-                return TargetAllocation(self.current_alloc)
+            # We need at least 10 periods (50 mins) to calculate a 45-min structural floor against the current price
+            if len(p_hist) >= 10:
+                curr = p_hist[-1]["close"]
+                
+                # The floor is the lowest 'low' of the previous 9 bars (45 mins).
+                # We do not include the current bar in the floor calculation.
+                recent_lows = [x["low"] for x in p_hist[-10:-1]]
+                structural_floor = min(recent_lows)
+                
+                # EXIT: If the current close drops below the established structural floor
+                if curr < structural_floor:
+                    log(f"EXIT: {self.primary_asset} broke structural floor ({structural_floor:.2f}).")
+                    self.system_lockout_counter = self.lockout_duration
+                    self.primary_asset = None
+                    self.current_alloc = {"SGOV": 1.0}
+                    return TargetAllocation(self.current_alloc)
 
         return None
