@@ -5,10 +5,10 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (15-MINUTE UPGRADE) ---
-        # TIMEFRAME FIX: Shifted to 15m to eliminate whipsaw and improve Profit Factor.
+        # --- NITRO SERIES K (1-HOUR ENGINE) ---
+        # TIMEFRAME FIX: Shifted to 1hour to bypass platform limits and eliminate whipsaw.
         # ASSETS: Baseline test (No Silver).
-        # SETTINGS: All time-based parameters divided by 3 to match physical time.
+        # SETTINGS: All time-based parameters scaled to fit a 6.5-hour trading day.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
@@ -16,12 +16,12 @@ class TradingStrategy(Strategy):
         self.vixy = "VXX"
         self.spy = "SPY"
 
-        # --- PARAMETERS (Adjusted for 15-Minute Bars) ---
-        self.vix_ma_len = 130 # 5 Days (130 * 15min)
-        self.mom_len = 13 # Momentum Window (195 minutes)
-        self.trend_len = 52 # SPY Trend (2 Days)
-        self.lockout_duration = 13 # 195 Minutes Lockout
-        self.atr_period = 14 # Standard 14-bar ATR (now covers 3.5 hours of volatility)
+        # --- PARAMETERS (Adjusted for 1-Hour Bars) ---
+        self.vix_ma_len = 33 # 5 Days (approx 33 * 1hour bars)
+        self.mom_len = 3 # Momentum Window (3 hours)
+        self.trend_len = 13 # SPY Trend (2 Days / 13 hours)
+        self.lockout_duration = 3 # 3 Hours Lockout
+        self.atr_period = 14 # Standard 14-bar ATR (now covers 14 hours of volatility)
         
         self.system_lockout_counter = 0
         self.primary_asset = None
@@ -32,8 +32,8 @@ class TradingStrategy(Strategy):
 
     @property
     def interval(self):
-        # STRATEGY UPGRADE: Moved from 5min to 15min
-        return "15min"
+        # STRATEGY UPGRADE: Moved to 1hour to bypass platform KeyError
+        return "1hour"
 
     @property
     def assets(self):
@@ -64,7 +64,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K: 15-Minute Engine Active. VXX Buffer Active. No Silver.")
+            log(f"NITRO K: 1-Hour Engine Active. VXX Buffer Active. No Silver.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK (Churn Protection)
