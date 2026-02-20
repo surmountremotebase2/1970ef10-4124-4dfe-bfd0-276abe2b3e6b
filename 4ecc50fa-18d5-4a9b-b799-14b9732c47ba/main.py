@@ -5,10 +5,10 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (SYNTHETIC 15-MIN + 50/50 SPLIT + DRIFT) ---
+        # --- NITRO SERIES K (SYNTHETIC 15-MIN + 100% CONCENTRATED) ---
         # TIMEFRAME FIX: Interval 5m. Gated to execute every 15 minutes.
-        # WEIGHTING: Resilient 50/50 split. 
-        # FIX: 'return None' implemented to stop micro-rebalancing and let winners run.
+        # ALLOCATION: 100% Concentrated into the top momentum leader. 
+        # LOGIC: Reverts to the 40% baseline math to isolate the Profit Factor.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
@@ -24,9 +24,9 @@ class TradingStrategy(Strategy):
         self.atr_period = 14 
         
         self.system_lockout_counter = 0
-        self.held_assets = [] 
-        self.entry_prices = {}
-        self.peak_prices = {}
+        self.primary_asset = None
+        self.entry_price = None
+        self.peak_price = None
         self.debug_printed = False
         self.vxx_shield_active = False
         
@@ -68,7 +68,7 @@ class TradingStrategy(Strategy):
         self.bar_counter += 1
         
         if not self.debug_printed:
-            log("NITRO K: Synthetic 15-Min Engine. Drift Active.")
+            log("NITRO K: Synthetic 15-Min Engine. 100% Concentrated.")
             self.debug_printed = True
 
         # 1. GLOBAL LOCKOUT CHECK 
@@ -77,11 +77,11 @@ class TradingStrategy(Strategy):
             if self.system_lockout_counter == 0:
                 self.current_alloc = {"SGOV": 1.0}
                 return TargetAllocation(self.current_alloc)
-            return None # Do nothing while locked out
+            return None 
 
         # --- SYNTHETIC 15-MINUTE GATEKEEPER ---
         if self.bar_counter % 3 != 0:
-            return None # Do nothing on the off-bars
+            return None 
 
         # --- CORE DECISION LOGIC ---
 
@@ -103,68 +103,46 @@ class TradingStrategy(Strategy):
                 log("VXX Shield DISENGAGED.")
 
             if self.vxx_shield_active:
-                if self.held_assets: # Only reallocate if we are actually holding something
-                    self.held_assets = []
+                if self.primary_asset is not None:
+                    self.primary_asset = None
                     self.current_alloc = {"SGOV": 1.0}
                     return TargetAllocation(self.current_alloc)
                 return None
 
         # 4. SCORING & SELECTION
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in self.tickers}
-        sorted_leaders = sorted(scores, key=scores.get, reverse=True)
-        top_2 = [sorted_leaders[0], sorted_leaders[1]]
+        leader = sorted(scores, key=scores.get, reverse=True)[0]
 
         # A. ENTRY LOGIC
-        if not self.held_assets:
+        if self.primary_asset is None:
             if governor_blocks_entries:
                 if self.current_alloc.get("SGOV") != 1.0:
                     self.current_alloc = {"SGOV": 1.0}
                     return TargetAllocation(self.current_alloc)
                 return None
             
-            valid_leaders = [t for t in top_2 if scores[t] > 0]
-            
-            if len(valid_leaders) == 2:
-                self.held_assets = valid_leaders
-                self.current_alloc = {valid_leaders[0]: 0.5, valid_leaders[1]: 0.5}
-                self.entry_prices = {t: self.get_history(d, t)[-1]["close"] for t in valid_leaders}
-                self.peak_prices = {t: self.get_history(d, t)[-1]["close"] for t in valid_leaders}
-                log(f"ENTRY: 50/50 Split -> {valid_leaders[0]} & {valid_leaders[1]}")
-                return TargetAllocation(self.current_alloc)
-            
-            elif len(valid_leaders) == 1:
-                l = valid_leaders[0]
-                self.held_assets = [l]
-                self.current_alloc = {l: 0.5, "SGOV": 0.5}
-                self.entry_prices = {l: self.get_history(d, l)[-1]["close"]}
-                self.peak_prices = {l: self.get_history(d, l)[-1]["close"]}
-                log(f"ENTRY: 50/50 Split -> {l} & SGOV")
+            if scores[leader] > 0:
+                self.primary_asset = leader
+                self.entry_price = self.get_history(d, leader)[-1]["close"]
+                self.peak_price = self.entry_price
+                self.current_alloc = {leader: 1.0}
+                log(f"ENTRY: 100% Concentrated -> {leader} at {self.entry_price}")
                 return TargetAllocation(self.current_alloc)
             else:
                 return None
 
         # B. MANAGEMENT LOGIC
-        hit_stop = False
-        for asset in list(self.held_assets):
-            p_hist = self.get_history(d, asset)
-            if p_hist:
-                curr = p_hist[-1]["close"]
-                self.peak_prices[asset] = max(self.peak_prices.get(asset, curr), curr)
-                atr = self.calculate_atr(p_hist) or (curr * 0.02)
-                
-                entry_p = self.entry_prices.get(asset, curr)
-                peak_p = self.peak_prices.get(asset, curr)
-                
-                if curr <= entry_p - (7.0 * atr) or curr <= peak_p - (12.0 * atr):
-                    log(f"EXIT: {asset} Stop/Trail Hit. Lockdown Engaged.")
-                    hit_stop = True
-        
-        if hit_stop:
-            self.system_lockout_counter = self.lockout_duration
-            self.held_assets = []
-            self.current_alloc = {"SGOV": 1.0}
-            return TargetAllocation(self.current_alloc)
+        p_hist = self.get_history(d, self.primary_asset)
+        if p_hist:
+            curr = p_hist[-1]["close"]
+            self.peak_price = max(self.peak_price, curr)
+            atr = self.calculate_atr(p_hist) or (curr * 0.02)
+            
+            if curr <= self.entry_price - (7.0 * atr) or curr <= self.peak_price - (12.0 * atr):
+                log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
+                self.system_lockout_counter = self.lockout_duration
+                self.primary_asset = None
+                self.current_alloc = {"SGOV": 1.0}
+                return TargetAllocation(self.current_alloc)
 
-        # C. HOLD STATE (DRIFT)
-        # If no entries or exits are triggered, do absolutely nothing. 
         return None
