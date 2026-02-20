@@ -6,9 +6,9 @@ import numpy as np
 class TradingStrategy(Strategy):
     def __init__(self):
         # --- NITRO SERIES K (SYNTHETIC 15-MIN + 50/50 SPLIT) ---
-        # TIMEFRAME FIX: Interval set to 5m for platform compatibility, 
-        # but logic is gated to execute only every 15 minutes to eliminate whipsaw.
-        # WEIGHTING: Re-integrated the Resilient 50/50 allocation split.
+        # TIMEFRAME FIX: Interval set to 5m for platform compatibility.
+        # LOGIC: Gated to execute only every 15 minutes to eliminate whipsaw.
+        # WEIGHTING: Resilient 50/50 allocation split.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
@@ -74,18 +74,16 @@ class TradingStrategy(Strategy):
             self.debug_printed = True
 
         # 1. GLOBAL LOCKOUT CHECK 
-        # (Runs every 5 mins to count down accurately)
         if self.system_lockout_counter > 0:
             self.system_lockout_counter -= 1
             self.current_alloc = {"SGOV": 1.0}
             return TargetAllocation(self.current_alloc)
 
         # --- SYNTHETIC 15-MINUTE GATEKEEPER ---
-        # Skips execution on bars 1 and 2, only runs core logic on bar 3
         if self.bar_counter % 3 != 0:
             return TargetAllocation(self.current_alloc)
 
-        # --- CORE DECISION LOGIC (Executes every 15 mins) ---
+        # --- CORE DECISION LOGIC ---
 
         # 2. GOVERNOR CHECK (Entry-Only)
         spy_hist = self.get_history(d, self.spy)
@@ -131,7 +129,6 @@ class TradingStrategy(Strategy):
                 return TargetAllocation(self.current_alloc)
             
             elif len(valid_leaders) == 1:
-                # If only 1 asset has positive momentum, split 50% Asset / 50% Cash
                 l = valid_leaders[0]
                 self.held_assets = [l]
                 self.current_alloc = {l: 0.5, "SGOV": 0.5}
@@ -149,4 +146,22 @@ class TradingStrategy(Strategy):
             p_hist = self.get_history(d, asset)
             if p_hist:
                 curr = p_hist[-1]["close"]
-                self.peak_
+                self.peak_prices[asset] = max(self.peak_prices.get(asset, curr), curr)
+                atr = self.calculate_atr(p_hist) or (curr * 0.02)
+                
+                entry_p = self.entry_prices.get(asset, curr)
+                peak_p = self.peak_prices.get(asset, curr)
+                
+                # STOP LOSS (7.0x) or TRAILING STOP (12.0x)
+                if curr <= entry_p - (7.0 * atr) or curr <= peak_p - (12.0 * atr):
+                    log(f"EXIT: {asset} Stop/Trail Hit. Lockdown Engaged.")
+                    hit_stop = True
+        
+        # If any asset hits its stop, the entire engine locks down
+        if hit_stop:
+            self.system_lockout_counter = self.lockout_duration
+            self.held_assets = []
+            self.current_alloc = {"SGOV": 1.0}
+            return TargetAllocation(self.current_alloc)
+
+        return TargetAllocation(self.current_alloc)
