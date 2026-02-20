@@ -6,9 +6,9 @@ import numpy as np
 class TradingStrategy(Strategy):
     def __init__(self):
         # --- NITRO SERIES K (SYNTHETIC 15-MIN + 100% CONCENTRATED) ---
-        # TIMEFRAME FIX: Interval 5m. Gated to execute every 15 minutes.
-        # ALLOCATION: 100% Concentrated into the top momentum leader. 
-        # LOGIC: Reverts to the 40% baseline math to isolate the Profit Factor.
+        # TIMEFRAME: Interval 5m. Gated to execute every 15 minutes.
+        # ALLOCATION: 100% Concentrated.
+        # FIX: ATR limits tightened (5.0x Hard Stop / 8.0x Trailing Stop) to fix Profit Factor.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
@@ -68,7 +68,7 @@ class TradingStrategy(Strategy):
         self.bar_counter += 1
         
         if not self.debug_printed:
-            log("NITRO K: Synthetic 15-Min Engine. 100% Concentrated.")
+            log("NITRO K: Synthetic 15-Min Engine. Tight ATR Active.")
             self.debug_printed = True
 
         # 1. GLOBAL LOCKOUT CHECK 
@@ -138,7 +138,8 @@ class TradingStrategy(Strategy):
             self.peak_price = max(self.peak_price, curr)
             atr = self.calculate_atr(p_hist) or (curr * 0.02)
             
-            if curr <= self.entry_price - (7.0 * atr) or curr <= self.peak_price - (12.0 * atr):
+            # TIGHTENED STOPS: 5.0x Hard Stop / 8.0x Trailing Stop
+            if curr <= self.entry_price - (5.0 * atr) or curr <= self.peak_price - (8.0 * atr):
                 log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
                 self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
