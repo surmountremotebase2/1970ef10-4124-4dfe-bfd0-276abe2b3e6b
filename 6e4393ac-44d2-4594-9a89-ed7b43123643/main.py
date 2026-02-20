@@ -5,12 +5,12 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (AGQ UPGRADE) ---
-        # ACTION: Swapped SILJ (Miners) -> AGQ (2x Silver Bullion).
+        # --- NITRO SERIES K (SILVER REMOVED) ---
+        # ACTION: Removed AGQ entirely for baseline testing.
         # LOGIC: "Entry-Only Governor" (Winners Run, Losers Blocked).
-        # UPDATE: ATR multipliers widened to prevent 5-minute churn and buy-sell loops.
+        # SETTINGS: Widened ATR limits (7.0x / 12.0x) retained.
         
-        self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU", "AGQ"]
+        self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
         self.safety = ["SGOV", "IAU", "DBMF"]
         self.vixy = "VXX"
@@ -62,7 +62,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K: AGQ Active. Widened ATR limits to reduce churn.")
+            log(f"NITRO K: Baseline Test (No Silver). Widened ATR active.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK (Churn Protection)
