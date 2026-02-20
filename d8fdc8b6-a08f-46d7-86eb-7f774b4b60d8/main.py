@@ -5,10 +5,10 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (1-HOUR ENGINE) ---
-        # TIMEFRAME FIX: Shifted to 1hour to bypass platform limits and eliminate whipsaw.
-        # ASSETS: Baseline test (No Silver).
-        # SETTINGS: All time-based parameters scaled to fit a 6.5-hour trading day.
+        # --- NITRO SERIES K (SYNTHETIC 15-MIN + 50/50 SPLIT) ---
+        # TIMEFRAME FIX: Interval set to 5m for platform compatibility, 
+        # but logic is gated to execute only every 15 minutes to eliminate whipsaw.
+        # WEIGHTING: Re-integrated the Resilient 50/50 allocation split.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU"]
         
@@ -16,24 +16,28 @@ class TradingStrategy(Strategy):
         self.vixy = "VXX"
         self.spy = "SPY"
 
-        # --- PARAMETERS (Adjusted for 1-Hour Bars) ---
-        self.vix_ma_len = 33 # 5 Days (approx 33 * 1hour bars)
-        self.mom_len = 3 # Momentum Window (3 hours)
-        self.trend_len = 13 # SPY Trend (2 Days / 13 hours)
-        self.lockout_duration = 3 # 3 Hours Lockout
-        self.atr_period = 14 # Standard 14-bar ATR (now covers 14 hours of volatility)
+        # --- PARAMETERS (5-Minute Base Math) ---
+        self.vix_ma_len = 390 # 5 Days
+        self.mom_len = 40 # Momentum Window
+        self.trend_len = 156 # 2 Days
+        self.lockout_duration = 39 # 3.5 Hours
+        self.atr_period = 14 
         
         self.system_lockout_counter = 0
-        self.primary_asset = None
-        self.entry_price = None
-        self.peak_price = None
+        self.held_assets = [] 
+        self.entry_prices = {}
+        self.peak_prices = {}
         self.debug_printed = False
         self.vxx_shield_active = False
+        
+        # --- SYNTHETIC 15m VARIABLES ---
+        self.bar_counter = 0
+        self.current_alloc = {"SGOV": 1.0}
 
     @property
     def interval(self):
-        # STRATEGY UPGRADE: Moved to 1hour to bypass platform KeyError
-        return "1hour"
+        # Kept at 5min to bypass platform limitations
+        return "5min"
 
     @property
     def assets(self):
@@ -63,22 +67,31 @@ class TradingStrategy(Strategy):
         d = data["ohlcv"]
         if not d: return None
         
+        self.bar_counter += 1
+        
         if not self.debug_printed:
-            log(f"NITRO K: 1-Hour Engine Active. VXX Buffer Active. No Silver.")
+            log("NITRO K: Synthetic 15-Min Engine. 50/50 Split Active.")
             self.debug_printed = True
 
-        # 1. LOCKOUT CHECK (Churn Protection)
+        # 1. GLOBAL LOCKOUT CHECK 
+        # (Runs every 5 mins to count down accurately)
         if self.system_lockout_counter > 0:
             self.system_lockout_counter -= 1
-            return TargetAllocation({"SGOV": 1.0})
+            self.current_alloc = {"SGOV": 1.0}
+            return TargetAllocation(self.current_alloc)
+
+        # --- SYNTHETIC 15-MINUTE GATEKEEPER ---
+        # Skips execution on bars 1 and 2, only runs core logic on bar 3
+        if self.bar_counter % 3 != 0:
+            return TargetAllocation(self.current_alloc)
+
+        # --- CORE DECISION LOGIC (Executes every 15 mins) ---
 
         # 2. GOVERNOR CHECK (Entry-Only)
         spy_hist = self.get_history(d, self.spy)
-        if self.calculate_momentum(spy_hist, self.trend_len) < 0:
-            if self.primary_asset is None:
-                return TargetAllocation({"SGOV": 1.0})
+        governor_blocks_entries = self.calculate_momentum(spy_hist, self.trend_len) < 0
 
-        # 3. VXX SHIELD (Hard Defense with Hysteresis Buffer)
+        # 3. VXX SHIELD (With Hysteresis Buffer)
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
@@ -87,42 +100,53 @@ class TradingStrategy(Strategy):
             if not self.vxx_shield_active and current_vix > vix_ma:
                 self.vxx_shield_active = True
                 log("VXX Shield ENGAGED.")
-            
             elif self.vxx_shield_active and current_vix < (vix_ma * 0.98):
                 self.vxx_shield_active = False
                 log("VXX Shield DISENGAGED.")
 
             if self.vxx_shield_active:
-                self.primary_asset = None
-                return TargetAllocation({"SGOV": 1.0})
+                self.held_assets = []
+                self.current_alloc = {"SGOV": 1.0}
+                return TargetAllocation(self.current_alloc)
 
-        # 4. SCORING & SELECTION
+        # 4. SCORING & SELECTION (Top 2 for 50/50 Split)
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in self.tickers}
-        leader = sorted(scores, key=scores.get, reverse=True)[0]
+        sorted_leaders = sorted(scores, key=scores.get, reverse=True)
+        top_2 = [sorted_leaders[0], sorted_leaders[1]]
 
         # A. ENTRY LOGIC
-        if self.primary_asset is None:
-            if scores[leader] > 0:
-                self.primary_asset = leader
-                self.entry_price = self.get_history(d, leader)[-1]["close"]
-                self.peak_price = self.entry_price
-                log(f"ENTRY: {leader} at {self.entry_price}")
-                return TargetAllocation({leader: 1.0})
+        if not self.held_assets:
+            if governor_blocks_entries:
+                self.current_alloc = {"SGOV": 1.0}
+                return TargetAllocation(self.current_alloc)
+            
+            valid_leaders = [t for t in top_2 if scores[t] > 0]
+            
+            if len(valid_leaders) == 2:
+                self.held_assets = valid_leaders
+                self.current_alloc = {valid_leaders[0]: 0.5, valid_leaders[1]: 0.5}
+                self.entry_prices = {t: self.get_history(d, t)[-1]["close"] for t in valid_leaders}
+                self.peak_prices = {t: self.get_history(d, t)[-1]["close"] for t in valid_leaders}
+                log(f"ENTRY: 50/50 Split -> {valid_leaders[0]} & {valid_leaders[1]}")
+                return TargetAllocation(self.current_alloc)
+            
+            elif len(valid_leaders) == 1:
+                # If only 1 asset has positive momentum, split 50% Asset / 50% Cash
+                l = valid_leaders[0]
+                self.held_assets = [l]
+                self.current_alloc = {l: 0.5, "SGOV": 0.5}
+                self.entry_prices = {l: self.get_history(d, l)[-1]["close"]}
+                self.peak_prices = {l: self.get_history(d, l)[-1]["close"]}
+                log(f"ENTRY: 50/50 Split -> {l} & SGOV")
+                return TargetAllocation(self.current_alloc)
             else:
-                return TargetAllocation({"SGOV": 1.0})
+                self.current_alloc = {"SGOV": 1.0}
+                return TargetAllocation(self.current_alloc)
 
         # B. MANAGEMENT LOGIC
-        p_hist = self.get_history(d, self.primary_asset)
-        if p_hist:
-            curr = p_hist[-1]["close"]
-            self.peak_price = max(self.peak_price, curr)
-            atr = self.calculate_atr(p_hist) or (curr * 0.02)
-            
-            # STOP LOSS (7.0x) or TRAILING STOP (12.0x)
-            if curr <= self.entry_price - (7.0 * atr) or curr <= self.peak_price - (12.0 * atr):
-                log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
-                self.system_lockout_counter = self.lockout_duration
-                self.primary_asset = None
-                return TargetAllocation({"SGOV": 1.0})
-
-            return TargetAllocation({self.primary_asset: 1.0})
+        hit_stop = False
+        for asset in list(self.held_assets):
+            p_hist = self.get_history(d, asset)
+            if p_hist:
+                curr = p_hist[-1]["close"]
+                self.peak_
