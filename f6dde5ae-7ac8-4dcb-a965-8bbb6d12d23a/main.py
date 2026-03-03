@@ -5,9 +5,9 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (V2 - 15 MINUTE RECALIBRATION) ---
-        # ACTION: Shifted to supported 15m interval to eliminate platform KeyError.
-        # VAULT: 100% SGOV to prevent T+1 Good Faith Violations.
+        # --- NITRO SERIES K (V2 - 5 MINUTE BRAKE) ---
+        # ACTION: Reverted to 5min to fix KeyError, but mathematically choked the churn.
+        # FIX: VXX Shield now triggers the full 1-Day Lockout to stop 5-minute whipsaws.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU", "AGQ"]
         
@@ -18,11 +18,11 @@ class TradingStrategy(Strategy):
         self.vixy = "VXX"
         self.spy = "SPY"
 
-        # --- PARAMETERS (Recalibrated for 15min: 26 bars per trading day) ---
-        self.vix_ma_len = 26 # 1 Trading Day (Fast Recovery)
-        self.mom_len = 14 # ~3.5 Hours (Offensive Engine Lookback)
-        self.trend_len = 52 # 2 Trading Days (SPY Trend Filter)
-        self.lockout_duration = 26 # 1 Full Trading Day (Anti-Churn Lockout)
+        # --- PARAMETERS (Calibrated for 5min: ~78 bars per trading day) ---
+        self.vix_ma_len = 78 # 1 Trading Day (Fast Recovery)
+        self.mom_len = 40 # ~3.3 Hours (Offensive Engine Lookback)
+        self.trend_len = 156 # 2 Trading Days (SPY Trend Filter)
+        self.lockout_duration = 78 # 1 FULL TRADING DAY (Anti-Churn Lockout)
         self.atr_period = 14
         
         self.system_lockout_counter = 0
@@ -33,7 +33,8 @@ class TradingStrategy(Strategy):
 
     @property
     def interval(self):
-        return "15min"
+        # Guaranteed to compile on Surmount
+        return "5min"
 
     @property
     def assets(self):
@@ -64,7 +65,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K V2 [15MIN]: Bypass Active. 10.0x ATR Trailer. 100% SGOV Vault.")
+            log(f"NITRO K V2 [5MIN BRAKE]: Bypass Active. 10.0x ATR Trailer. 1-Day VXX Lockout.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK (Churn Protection - Now 1 Full Day)
@@ -72,12 +73,16 @@ class TradingStrategy(Strategy):
             self.system_lockout_counter -= 1
             return TargetAllocation({"SGOV": 1.0})
 
-        # 2. VXX SHIELD (Hard Defense)
+        # 2. VXX SHIELD (Hard Defense with Anti-Whipsaw Lockout)
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
             if vix_data[-1]["close"] > vix_ma:
-                self.primary_asset = None
+                if self.primary_asset is not None:
+                    log(f"VXX SPIKE: Exiting {self.primary_asset}. 1-Day Lockdown Engaged.")
+                    # Engaging the lockout prevents buying back in 5 mins later
+                    self.system_lockout_counter = self.lockout_duration 
+                    self.primary_asset = None
                 return TargetAllocation({"SGOV": 1.0})
 
         # 3. GOVERNOR BYPASS & SCORING
