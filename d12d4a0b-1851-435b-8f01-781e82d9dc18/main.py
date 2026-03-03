@@ -6,7 +6,7 @@ class TradingStrategy(Strategy):
     def __init__(self):
         # --- NITRO SERIES K (V2 UPGRADE) ---
         # ACTION: Applied Uncorrelated Bypass, Fast-Recovery VXX, and Looser Trailing Stop.
-        # GOAL: Catch crisis rallies and re-enter the market faster after volatility spikes.
+        # VAULT: 100% SGOV to prevent T+1 Cash Account Good Faith Violations.
         
         self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU", "AGQ"]
         
@@ -18,7 +18,7 @@ class TradingStrategy(Strategy):
         self.spy = "SPY"
 
         # --- PARAMETERS ---
-        self.vix_ma_len = 78 # UPGRADE 1: 1 Day (78 * 5min) for faster re-entry
+        self.vix_ma_len = 78 # 1 Day (78 * 5min) for faster re-entry
         self.mom_len = 40 # Momentum Window (40 * 5min)
         self.trend_len = 156 # SPY Trend (2 Days)
         self.lockout_duration = 39 # 3.5 Hours
@@ -63,7 +63,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K V2: Bypass Active. Fast VXX. 10.0x ATR Trailer.")
+            log(f"NITRO K V2: Bypass Active. Fast VXX. 10.0x ATR Trailer. 100% SGOV Vault.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK (Churn Protection)
@@ -71,8 +71,7 @@ class TradingStrategy(Strategy):
             self.system_lockout_counter -= 1
             return TargetAllocation({"SGOV": 1.0})
 
-        # 2. VXX SHIELD (Hard Defense - Now Recovers Faster)
-        # If Volatility spikes, SELL EVERYTHING immediately.
+        # 2. VXX SHIELD (Hard Defense - Recovers in 1 Day)
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
@@ -81,16 +80,14 @@ class TradingStrategy(Strategy):
                 return TargetAllocation({"SGOV": 1.0})
 
         # 3. GOVERNOR BYPASS & SCORING
-        # Evaluate SPY Trend to determine which assets are allowed to be scored for entry
         valid_tickers = self.tickers.copy()
         
         if self.primary_asset is None:
             spy_hist = self.get_history(d, self.spy)
             if self.calculate_momentum(spy_hist, self.trend_len) < 0:
-                # UPGRADE 2: SPY is down. Only score uncorrelated assets (e.g., AGQ, UCO).
+                # SPY is down. Only score uncorrelated assets (AGQ, UCO, BITU).
                 valid_tickers = self.uncorrelated_assets
                 
-        # Score the eligible assets
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in valid_tickers}
         leader = sorted(scores, key=scores.get, reverse=True)[0]
 
@@ -112,7 +109,7 @@ class TradingStrategy(Strategy):
             self.peak_price = max(self.peak_price, curr)
             atr = self.calculate_atr(p_hist) or (curr * 0.02)
             
-            # UPGRADE 3: STOP LOSS (4.5x) or TRAILING STOP (10.0x)
+            # STOP LOSS (4.5x) or TRAILING STOP (10.0x)
             if curr <= self.entry_price - (4.5 * atr) or curr <= self.peak_price - (10.0 * atr):
                 log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
                 self.system_lockout_counter = self.lockout_duration
