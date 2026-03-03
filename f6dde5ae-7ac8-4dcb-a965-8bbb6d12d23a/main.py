@@ -5,24 +5,24 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (V2 - 12 MINUTE CALIBRATION) ---
-        # ACTION: Slowed interval to 12m to eliminate Pattern Day Trading (PDT) risk.
+        # --- NITRO SERIES K (V2 - 15 MINUTE RECALIBRATION) ---
+        # ACTION: Shifted to supported 15m interval to eliminate platform KeyError.
         # VAULT: 100% SGOV to prevent T+1 Good Faith Violations.
         
-        self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "IBIT", "SLV"]
+        self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU", "AGQ"]
         
         # CATEGORY OVERRIDE: Assets allowed to bypass the SPY Governor
-        self.uncorrelated_assets = ["SLV", "UCO", "IBIT"]
+        self.uncorrelated_assets = ["AGQ", "UCO", "BITU"]
         
         self.safety = ["SGOV", "IAU", "DBMF"]
         self.vixy = "VXX"
         self.spy = "SPY"
 
-        # --- PARAMETERS (Recalibrated for 12min: ~32.5 bars per trading day) ---
-        self.vix_ma_len = 33 # 1 Trading Day (Fast Recovery)
-        self.mom_len = 1300 # 40 Trading Days (Offensive Engine Lookback)
-        self.trend_len = 65 # 2 Trading Days (SPY Trend Filter)
-        self.lockout_duration = 33 # 1 Full Trading Day (Anti-Churn Lockout)
+        # --- PARAMETERS (Recalibrated for 15min: 26 bars per trading day) ---
+        self.vix_ma_len = 26 # 1 Trading Day (Fast Recovery)
+        self.mom_len = 14 # ~3.5 Hours (Offensive Engine Lookback)
+        self.trend_len = 52 # 2 Trading Days (SPY Trend Filter)
+        self.lockout_duration = 26 # 1 Full Trading Day (Anti-Churn Lockout)
         self.atr_period = 14
         
         self.system_lockout_counter = 0
@@ -33,7 +33,7 @@ class TradingStrategy(Strategy):
 
     @property
     def interval(self):
-        return "12min"
+        return "15min"
 
     @property
     def assets(self):
@@ -64,7 +64,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K V2 [12MIN]: Bypass Active. 10.0x ATR Trailer. 100% SGOV Vault.")
+            log(f"NITRO K V2 [15MIN]: Bypass Active. 10.0x ATR Trailer. 100% SGOV Vault.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK (Churn Protection - Now 1 Full Day)
