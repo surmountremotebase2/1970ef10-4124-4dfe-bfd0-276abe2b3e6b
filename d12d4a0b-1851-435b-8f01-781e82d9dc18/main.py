@@ -5,24 +5,24 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (V2 UPGRADE) ---
-        # ACTION: Applied Uncorrelated Bypass, Fast-Recovery VXX, and Looser Trailing Stop.
-        # VAULT: 100% SGOV to prevent T+1 Cash Account Good Faith Violations.
+        # --- NITRO SERIES K (V2 - 12 MINUTE CALIBRATION) ---
+        # ACTION: Slowed interval to 12m to eliminate Pattern Day Trading (PDT) risk.
+        # VAULT: 100% SGOV to prevent T+1 Good Faith Violations.
         
-        self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "BITU", "AGQ"]
+        self.tickers = ["SOXL", "FNGU", "DFEN", "UCO", "URNM", "IBIT", "SLV"]
         
         # CATEGORY OVERRIDE: Assets allowed to bypass the SPY Governor
-        self.uncorrelated_assets = ["AGQ", "UCO", "BITU"]
+        self.uncorrelated_assets = ["SLV", "UCO", "IBIT"]
         
         self.safety = ["SGOV", "IAU", "DBMF"]
         self.vixy = "VXX"
         self.spy = "SPY"
 
-        # --- PARAMETERS ---
-        self.vix_ma_len = 78 # 1 Day (78 * 5min) for faster re-entry
-        self.mom_len = 40 # Momentum Window (40 * 5min)
-        self.trend_len = 156 # SPY Trend (2 Days)
-        self.lockout_duration = 39 # 3.5 Hours
+        # --- PARAMETERS (Recalibrated for 12min: ~32.5 bars per trading day) ---
+        self.vix_ma_len = 33 # 1 Trading Day (Fast Recovery)
+        self.mom_len = 1300 # 40 Trading Days (Offensive Engine Lookback)
+        self.trend_len = 65 # 2 Trading Days (SPY Trend Filter)
+        self.lockout_duration = 33 # 1 Full Trading Day (Anti-Churn Lockout)
         self.atr_period = 14
         
         self.system_lockout_counter = 0
@@ -33,7 +33,7 @@ class TradingStrategy(Strategy):
 
     @property
     def interval(self):
-        return "5min"
+        return "12min"
 
     @property
     def assets(self):
@@ -64,15 +64,15 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K V2: Bypass Active. Fast VXX. 10.0x ATR Trailer. 100% SGOV Vault.")
+            log(f"NITRO K V2 [12MIN]: Bypass Active. 10.0x ATR Trailer. 100% SGOV Vault.")
             self.debug_printed = True
 
-        # 1. LOCKOUT CHECK (Churn Protection)
+        # 1. LOCKOUT CHECK (Churn Protection - Now 1 Full Day)
         if self.system_lockout_counter > 0:
             self.system_lockout_counter -= 1
             return TargetAllocation({"SGOV": 1.0})
 
-        # 2. VXX SHIELD (Hard Defense - Recovers in 1 Day)
+        # 2. VXX SHIELD (Hard Defense)
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
@@ -86,7 +86,7 @@ class TradingStrategy(Strategy):
         if self.primary_asset is None:
             spy_hist = self.get_history(d, self.spy)
             if self.calculate_momentum(spy_hist, self.trend_len) < 0:
-                # SPY is down. Only score uncorrelated assets (AGQ, UCO, BITU).
+                # SPY is down. Only score uncorrelated assets.
                 valid_tickers = self.uncorrelated_assets
                 
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in valid_tickers}
@@ -112,7 +112,7 @@ class TradingStrategy(Strategy):
             
             # STOP LOSS (4.5x) or TRAILING STOP (10.0x)
             if curr <= self.entry_price - (4.5 * atr) or curr <= self.peak_price - (10.0 * atr):
-                log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
+                log(f"EXIT: {self.primary_asset} Stop/Trail Hit. 1-Day Lockdown Engaged.")
                 self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
                 return TargetAllocation({"SGOV": 1.0})
