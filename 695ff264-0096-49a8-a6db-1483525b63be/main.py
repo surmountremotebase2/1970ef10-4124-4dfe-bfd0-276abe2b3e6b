@@ -3,22 +3,21 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (THE CANNON v2 - 30% DEPLOYMENT) ---
-        # ACTION: Widened stops to 2.0x Hard / 4.0x Trail to fix Profit Factor bleed.
-        # ACTION: Cleaned architecture. Removed legacy Composer ticker workarounds.
+        # --- NITRO SERIES K (THE CANNON v3 - MEAN REVERSION) ---
+        # ACTION: Flipped engine from Breakout to Mean Reversion (Buy the Dip).
+        # LOGIC: Buys assets that are dropping sharply intraday while the macro market (SPY) is green.
         
         self.tickers = ["TQQQ", "SOXL", "FNGU", "BITU"]
         self.safety = ["SGOV"]
-        
         self.vixy = "VIXY" 
         self.spy = "SPY"
 
         # --- HYPER-AGGRESSIVE PARAMETERS ---
-        self.vix_ma_len = 78 # 1 Day VIXY moving average (Highly sensitive)
-        self.mom_len = 12 # 1 Hour Momentum (12 * 5min)
-        self.trend_len = 78 # 1 Day SPY Trend (Only trades if the day is green)
+        self.vix_ma_len = 78 # 1 Day VIXY moving average
+        self.mom_len = 12 # 1 Hour Lookback (Looking for the dip)
+        self.trend_len = 78 # 1 Day SPY Trend (Market must be green)
         self.lockout_duration = 12 # 1 Hour Lockout after ejection
-        self.atr_period = 78 # 1 Full Trading Day for tight intraday stops
+        self.atr_period = 78 # 1 Full Trading Day
         
         self.system_lockout_counter = 0
         self.primary_asset = None
@@ -67,7 +66,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"CANNON v2 ACTIVE: 2.0x Hard Stop, 4.0x ATR Trailing Stop.")
+            log(f"CANNON v3 ACTIVE: Mean Reversion Engine. Buying the Dip.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
@@ -93,17 +92,19 @@ class TradingStrategy(Strategy):
                     return TargetAllocation({"SGOV": 1.0})
                 return None
 
-        # 3. DAILY SPY GOVERNOR CHECK (1-Day Trend)
+        # 3. DAILY SPY GOVERNOR CHECK (Macro Market Must Be Up)
         spy_hist = self.get_history(d, self.spy)
         spy_trend_down = self.calculate_momentum(spy_hist, self.trend_len) < 0
 
-        # 4. SCORING & SELECTION
+        # 4. SCORING & SELECTION (Find the asset bleeding the most)
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in self.tickers}
-        leader = sorted(scores, key=scores.get, reverse=True)[0]
+        # Sort lowest to highest to target the biggest negative momentum
+        leader = sorted(scores, key=scores.get, reverse=False)[0]
 
         # A. ENTRY LOGIC
         if self.primary_asset is None:
-            if scores[leader] > 0 and not spy_trend_down:
+            # ONLY BUY IF: SPY is green AND the asset has dropped at least 1.5% in the last hour
+            if not spy_trend_down and scores[leader] < -0.015:
                 if self.current_position != "SGOV":
                     self.current_position = "SGOV"
                     return TargetAllocation({"SGOV": 1.0})
@@ -112,7 +113,9 @@ class TradingStrategy(Strategy):
                 self.entry_price = self.get_history(d, leader)[-1]["close"]
                 self.peak_price = self.entry_price
                 self.current_position = leader
-                log(f"ENTRY: Cannon firing on {leader} at {self.entry_price}")
+                
+                drop_pct = scores[leader] * 100
+                log(f"ENTRY: Buying the dip on {leader} at {self.entry_price} (1hr drop: {drop_pct:.2f}%)")
                 return TargetAllocation({leader: 1.0})
             else:
                 if self.current_position != "SGOV":
@@ -130,8 +133,8 @@ class TradingStrategy(Strategy):
             if atr == 0:
                 atr = curr * 0.02 
             
-            # WIDENED STOPS: 2.0x Hard Stop, 4.0x Trailing Stop
-            if curr <= self.entry_price - (2.0 * atr) or curr <= self.peak_price - (4.0 * atr):
+            # TIGHT STOPS RESTORED: Catch the bounce, lock it in, or cut the falling knife instantly
+            if curr <= self.entry_price - (1.5 * atr) or curr <= self.peak_price - (3.0 * atr):
                 log(f"EXIT: Cannon Stop/Trail Hit. Securing capital.")
                 self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
