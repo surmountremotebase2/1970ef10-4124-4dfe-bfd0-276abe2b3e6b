@@ -3,13 +3,12 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (THE SNIPER / STATE ENGINE UPGRADE) ---
-        # ACTION: Implemented State Engine to eliminate micro-rebalance churn.
-        # REASON: Returning TargetAllocation every 5 minutes caused fake trades and phantom returns.
-        # FIX: Engine now tracks self.current_position and returns 'None' to hold without transacting.
+        # --- NITRO SERIES K (STRESS TEST / REALITY CHECK) ---
+        # ACTION: Swapped AGQ for TMF (3x Treasuries) to remove the silver bull-run anomaly.
+        # REASON: Forces the engine to prove its logic on an asset with normal cyclicality and chop.
         
         self.tickers_equity = ["SOXL", "FNGU", "DFEN"]
-        self.tickers_alt = ["UCO", "URNM", "BITU", "AGQ"]
+        self.tickers_alt = ["UCO", "URNM", "BITU", "TMF"]
         self.tickers = self.tickers_equity + self.tickers_alt
         
         self.safety = ["SGOV", "IAU", "DBMF"]
@@ -25,7 +24,7 @@ class TradingStrategy(Strategy):
         
         self.system_lockout_counter = 0
         self.primary_asset = None
-        self.current_position = "SGOV" # NEW: Tracks the actual deployed state
+        self.current_position = "SGOV" 
         self.entry_price = None
         self.peak_price = None
         self.debug_printed = False
@@ -70,18 +69,18 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K: State Engine Active. Eliminating micro-rebalance churn.")
+            log(f"NITRO K: Stress Test Active. AGQ Removed. State Engine Engaged.")
             self.debug_printed = True
 
-        # 1. LOCKOUT CHECK (Churn Protection)
+        # 1. LOCKOUT CHECK 
         if self.system_lockout_counter > 0:
             self.system_lockout_counter -= 1
             if self.current_position != "SGOV":
                 self.current_position = "SGOV"
                 return TargetAllocation({"SGOV": 1.0})
-            return None # Hold cash, do nothing
+            return None 
 
-        # 2. VXX SHIELD (3-Candle Confirmation & Lockout)
+        # 2. VXX SHIELD 
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
@@ -91,13 +90,12 @@ class TradingStrategy(Strategy):
                     self.system_lockout_counter = self.lockout_duration
                     self.primary_asset = None
                 
-                # State Engine Check
                 if self.current_position != "SGOV":
                     self.current_position = "SGOV"
                     return TargetAllocation({"SGOV": 1.0})
                 return None
 
-        # 3. SPY GOVERNOR CHECK (5-Day Trend Evaluation)
+        # 3. SPY GOVERNOR CHECK 
         spy_hist = self.get_history(d, self.spy)
         spy_trend_down = self.calculate_momentum(spy_hist, self.trend_len) < 0
 
@@ -108,7 +106,6 @@ class TradingStrategy(Strategy):
         # A. ENTRY LOGIC
         if self.primary_asset is None:
             if scores[leader] > 0:
-                # Governor blocks Equities only
                 if leader in self.tickers_equity and spy_trend_down:
                     if self.current_position != "SGOV":
                         self.current_position = "SGOV"
@@ -137,7 +134,6 @@ class TradingStrategy(Strategy):
             if atr == 0:
                 atr = curr * 0.02 
             
-            # WIDENED STOPS: 6.0x Hard Stop, 12.0x Trailing Stop
             if curr <= self.entry_price - (6.0 * atr) or curr <= self.peak_price - (12.0 * atr):
                 log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
                 self.system_lockout_counter = self.lockout_duration
@@ -148,7 +144,6 @@ class TradingStrategy(Strategy):
                     return TargetAllocation({"SGOV": 1.0})
                 return None
 
-            # Return None to hold the position and prevent fractional rebalancing
             return None
             
         return None
