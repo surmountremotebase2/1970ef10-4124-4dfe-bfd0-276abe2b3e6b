@@ -3,9 +3,10 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (THE SNIPER / SWING UPGRADE) ---
-        # ACTION: Lengthened SPY trend filter to 5 days to confirm macro direction.
-        # ACTION: Widened stops to allow for multi-day/multi-week holds on leveraged assets.
+        # --- NITRO SERIES K (THE SNIPER / STATE ENGINE UPGRADE) ---
+        # ACTION: Implemented State Engine to eliminate micro-rebalance churn.
+        # REASON: Returning TargetAllocation every 5 minutes caused fake trades and phantom returns.
+        # FIX: Engine now tracks self.current_position and returns 'None' to hold without transacting.
         
         self.tickers_equity = ["SOXL", "FNGU", "DFEN"]
         self.tickers_alt = ["UCO", "URNM", "BITU", "AGQ"]
@@ -18,12 +19,13 @@ class TradingStrategy(Strategy):
         # --- PARAMETERS ---
         self.vix_ma_len = 390 # 5 Days (390 * 5min)
         self.mom_len = 78 # Momentum Window (1 Full Day)
-        self.trend_len = 390 # SPY Trend increased to 5 Days (78 * 5)
+        self.trend_len = 390 # SPY Trend increased to 5 Days
         self.lockout_duration = 39 # 3.5 Hours
-        self.atr_period = 1092 # 14 Full Trading Days (14 * 78)
+        self.atr_period = 1092 # 14 Full Trading Days
         
         self.system_lockout_counter = 0
         self.primary_asset = None
+        self.current_position = "SGOV" # NEW: Tracks the actual deployed state
         self.entry_price = None
         self.peak_price = None
         self.debug_printed = False
@@ -68,13 +70,16 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K: Sniper Mode Active. 5-Day SPY Trend & 12x ATR Trail.")
+            log(f"NITRO K: State Engine Active. Eliminating micro-rebalance churn.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK (Churn Protection)
         if self.system_lockout_counter > 0:
             self.system_lockout_counter -= 1
-            return TargetAllocation({"SGOV": 1.0})
+            if self.current_position != "SGOV":
+                self.current_position = "SGOV"
+                return TargetAllocation({"SGOV": 1.0})
+            return None # Hold cash, do nothing
 
         # 2. VXX SHIELD (3-Candle Confirmation & Lockout)
         vix_data = self.get_history(d, self.vixy)
@@ -85,7 +90,12 @@ class TradingStrategy(Strategy):
                     log("EXIT: Sustained Volatility Spike. Lockdown Engaged.")
                     self.system_lockout_counter = self.lockout_duration
                     self.primary_asset = None
-                return TargetAllocation({"SGOV": 1.0})
+                
+                # State Engine Check
+                if self.current_position != "SGOV":
+                    self.current_position = "SGOV"
+                    return TargetAllocation({"SGOV": 1.0})
+                return None
 
         # 3. SPY GOVERNOR CHECK (5-Day Trend Evaluation)
         spy_hist = self.get_history(d, self.spy)
@@ -100,15 +110,22 @@ class TradingStrategy(Strategy):
             if scores[leader] > 0:
                 # Governor blocks Equities only
                 if leader in self.tickers_equity and spy_trend_down:
-                    return TargetAllocation({"SGOV": 1.0})
+                    if self.current_position != "SGOV":
+                        self.current_position = "SGOV"
+                        return TargetAllocation({"SGOV": 1.0})
+                    return None
                 
                 self.primary_asset = leader
                 self.entry_price = self.get_history(d, leader)[-1]["close"]
                 self.peak_price = self.entry_price
+                self.current_position = leader
                 log(f"ENTRY: {leader} at {self.entry_price}")
                 return TargetAllocation({leader: 1.0})
             else:
-                return TargetAllocation({"SGOV": 1.0})
+                if self.current_position != "SGOV":
+                    self.current_position = "SGOV"
+                    return TargetAllocation({"SGOV": 1.0})
+                return None
 
         # B. MANAGEMENT LOGIC
         p_hist = self.get_history(d, self.primary_asset)
@@ -116,7 +133,6 @@ class TradingStrategy(Strategy):
             curr = p_hist[-1]["close"]
             self.peak_price = max(self.peak_price, curr)
             
-            # Use Macro ATR
             atr = self.calculate_atr(p_hist)
             if atr == 0:
                 atr = curr * 0.02 
@@ -126,8 +142,13 @@ class TradingStrategy(Strategy):
                 log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
                 self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
-                return TargetAllocation({"SGOV": 1.0})
+                
+                if self.current_position != "SGOV":
+                    self.current_position = "SGOV"
+                    return TargetAllocation({"SGOV": 1.0})
+                return None
 
-            return TargetAllocation({self.primary_asset: 1.0})
+            # Return None to hold the position and prevent fractional rebalancing
+            return None
             
         return None
