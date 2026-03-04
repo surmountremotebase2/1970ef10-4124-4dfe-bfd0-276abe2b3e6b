@@ -5,16 +5,16 @@ class TradingStrategy(Strategy):
     def __init__(self):
         # --- NITRO SERIES K (THE CANNON v2 - 30% DEPLOYMENT) ---
         # ACTION: Widened stops to 2.0x Hard / 4.0x Trail to fix Profit Factor bleed.
+        # ACTION: Cleaned architecture. Removed legacy Composer ticker workarounds.
         
         self.tickers = ["TQQQ", "SOXL", "FNGU", "BITU"]
         self.safety = ["SGOV"]
         
-        # Fixed ghost workaround to avoid VIXY ticker error in AI builder
-        self.vixy = "VXX" 
+        self.vixy = "VIXY" 
         self.spy = "SPY"
 
         # --- HYPER-AGGRESSIVE PARAMETERS ---
-        self.vix_ma_len = 78 # 1 Day VXX moving average (Highly sensitive)
+        self.vix_ma_len = 78 # 1 Day VIXY moving average (Highly sensitive)
         self.mom_len = 12 # 1 Hour Momentum (12 * 5min)
         self.trend_len = 78 # 1 Day SPY Trend (Only trades if the day is green)
         self.lockout_duration = 12 # 1 Hour Lockout after ejection
@@ -78,7 +78,7 @@ class TradingStrategy(Strategy):
                 return TargetAllocation({"SGOV": 1.0})
             return None 
 
-        # 2. INTRA-DAY VXX SHIELD 
+        # 2. INTRA-DAY VIXY SHIELD 
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
