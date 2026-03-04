@@ -4,11 +4,11 @@ from surmount.logging import log
 class TradingStrategy(Strategy):
     def __init__(self):
         # --- NITRO SERIES K (STRESS TEST / REALITY CHECK) ---
-        # ACTION: Swapped AGQ for TMF (3x Treasuries) to remove the silver bull-run anomaly.
-        # REASON: Forces the engine to prove its logic on an asset with normal cyclicality and chop.
+        # ACTION: Swapped AGQ for TMF and removed BITU.
+        # REASON: Stripping out all historical momentum anomalies to test the engine's core logic.
         
         self.tickers_equity = ["SOXL", "FNGU", "DFEN"]
-        self.tickers_alt = ["UCO", "URNM", "BITU", "TMF"]
+        self.tickers_alt = ["UCO", "URNM", "TMF"]
         self.tickers = self.tickers_equity + self.tickers_alt
         
         self.safety = ["SGOV", "IAU", "DBMF"]
@@ -69,7 +69,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K: Stress Test Active. AGQ Removed. State Engine Engaged.")
+            log(f"NITRO K: Stress Test Active. AGQ and BITU Removed. State Engine Engaged.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
