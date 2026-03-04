@@ -3,24 +3,21 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (STRESS TEST / REALITY CHECK) ---
-        # ACTION: Swapped AGQ for TMF and removed BITU.
-        # REASON: Stripping out all historical momentum anomalies to test the engine's core logic.
+        # --- NITRO SERIES K (THE CANNON - 30% DEPLOYMENT) ---
+        # ACTION: High-frequency day trading state engine.
+        # DESIGN: Operates completely independent of the Core deployment to prevent GFV cross-contamination.
         
-        self.tickers_equity = ["SOXL", "FNGU", "DFEN"]
-        self.tickers_alt = ["UCO", "URNM", "TMF"]
-        self.tickers = self.tickers_equity + self.tickers_alt
-        
-        self.safety = ["SGOV", "IAU", "DBMF"]
+        self.tickers = ["TQQQ", "SOXL", "FNGU", "BITU"]
+        self.safety = ["SGOV"]
         self.vixy = "VXX" 
         self.spy = "SPY"
 
-        # --- PARAMETERS ---
-        self.vix_ma_len = 390 # 5 Days (390 * 5min)
-        self.mom_len = 78 # Momentum Window (1 Full Day)
-        self.trend_len = 390 # SPY Trend increased to 5 Days
-        self.lockout_duration = 39 # 3.5 Hours
-        self.atr_period = 1092 # 14 Full Trading Days
+        # --- HYPER-AGGRESSIVE PARAMETERS ---
+        self.vix_ma_len = 78 # 1 Day VXX moving average (Highly sensitive)
+        self.mom_len = 12 # 1 Hour Momentum (12 * 5min)
+        self.trend_len = 78 # 1 Day SPY Trend (Only trades if the day is green)
+        self.lockout_duration = 12 # 1 Hour Lockout after ejection
+        self.atr_period = 78 # 1 Full Trading Day for tight intraday stops
         
         self.system_lockout_counter = 0
         self.primary_asset = None
@@ -69,7 +66,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"NITRO K: Stress Test Active. AGQ and BITU Removed. State Engine Engaged.")
+            log(f"CANNON ACTIVE: 1-Hour Momentum, 3x ATR Tight Stops.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
@@ -80,13 +77,13 @@ class TradingStrategy(Strategy):
                 return TargetAllocation({"SGOV": 1.0})
             return None 
 
-        # 2. VXX SHIELD 
+        # 2. INTRA-DAY VXX SHIELD 
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
-            if len(vix_data) >= 3 and all(x["close"] > vix_ma for x in vix_data[-3:]):
+            if len(vix_data) >= 2 and all(x["close"] > vix_ma for x in vix_data[-2:]):
                 if self.primary_asset is not None:
-                    log("EXIT: Sustained Volatility Spike. Lockdown Engaged.")
+                    log("EXIT: Intraday Volatility Spike. Cannon Disengaged.")
                     self.system_lockout_counter = self.lockout_duration
                     self.primary_asset = None
                 
@@ -95,7 +92,7 @@ class TradingStrategy(Strategy):
                     return TargetAllocation({"SGOV": 1.0})
                 return None
 
-        # 3. SPY GOVERNOR CHECK 
+        # 3. DAILY SPY GOVERNOR CHECK (1-Day Trend)
         spy_hist = self.get_history(d, self.spy)
         spy_trend_down = self.calculate_momentum(spy_hist, self.trend_len) < 0
 
@@ -105,18 +102,16 @@ class TradingStrategy(Strategy):
 
         # A. ENTRY LOGIC
         if self.primary_asset is None:
-            if scores[leader] > 0:
-                if leader in self.tickers_equity and spy_trend_down:
-                    if self.current_position != "SGOV":
-                        self.current_position = "SGOV"
-                        return TargetAllocation({"SGOV": 1.0})
-                    return None
+            if scores[leader] > 0 and not spy_trend_down:
+                if self.current_position != "SGOV":
+                    self.current_position = "SGOV"
+                    return TargetAllocation({"SGOV": 1.0})
                 
                 self.primary_asset = leader
                 self.entry_price = self.get_history(d, leader)[-1]["close"]
                 self.peak_price = self.entry_price
                 self.current_position = leader
-                log(f"ENTRY: {leader} at {self.entry_price}")
+                log(f"ENTRY: Cannon firing on {leader} at {self.entry_price}")
                 return TargetAllocation({leader: 1.0})
             else:
                 if self.current_position != "SGOV":
@@ -134,8 +129,9 @@ class TradingStrategy(Strategy):
             if atr == 0:
                 atr = curr * 0.02 
             
-            if curr <= self.entry_price - (6.0 * atr) or curr <= self.peak_price - (12.0 * atr):
-                log(f"EXIT: {self.primary_asset} Stop/Trail Hit. Lockdown Engaged.")
+            # TIGHT STOPS: 1.5x Hard Stop, 3.0x Trailing Stop
+            if curr <= self.entry_price - (1.5 * atr) or curr <= self.peak_price - (3.0 * atr):
+                log(f"EXIT: Cannon Stop/Trail Hit. Securing capital.")
                 self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
                 
