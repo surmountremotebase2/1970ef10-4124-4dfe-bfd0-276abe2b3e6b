@@ -3,17 +3,15 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (THE CANNON v3 - MEAN REVERSION) ---
-        # ACTION: Flipped engine from Breakout to Mean Reversion (Buy the Dip).
-        # FIX: Reverted VIXY back to VXX to resolve 'Failed to fetch' data error.
+        # --- NITRO SERIES K (CANNON v3 - DEBUG EDITION) ---
+        # ACTION: Stripped roster down to TQQQ only. Removed VXX/VIXY shield.
+        # REASON: Isolating the 'Failed to fetch' data error to see if a specific ticker is breaking the server.
         
-        self.tickers = ["TQQQ", "SOXL", "FNGU", "BITU"]
+        self.tickers = ["TQQQ"] # Stripped SOXL, FNGU, and BITU for isolation testing
         self.safety = ["SGOV"]
-        self.vixy = "VXX" # Restored known working ticker
         self.spy = "SPY"
 
         # --- HYPER-AGGRESSIVE PARAMETERS ---
-        self.vix_ma_len = 78 # 1 Day VXX moving average
         self.mom_len = 12 # 1 Hour Lookback (Looking for the dip)
         self.trend_len = 78 # 1 Day SPY Trend (Market must be green)
         self.lockout_duration = 12 # 1 Hour Lockout after ejection
@@ -32,7 +30,8 @@ class TradingStrategy(Strategy):
 
     @property
     def assets(self):
-        return self.tickers + self.safety + [self.vixy, self.spy]
+        # Removed VIX tracker from the required assets list entirely
+        return self.tickers + self.safety + [self.spy]
 
     def get_history(self, d, ticker):
         history = []
@@ -66,7 +65,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"CANNON v3 ACTIVE: Mean Reversion Engine. Buying the Dip.")
+            log(f"CANNON v3 DEBUG ACTIVE: TQQQ Isolation Test. VXX Disabled.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
@@ -77,26 +76,13 @@ class TradingStrategy(Strategy):
                 return TargetAllocation({"SGOV": 1.0})
             return None 
 
-        # 2. INTRA-DAY VXX SHIELD 
-        vix_data = self.get_history(d, self.vixy)
-        if len(vix_data) >= self.vix_ma_len:
-            vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
-            if len(vix_data) >= 2 and all(x["close"] > vix_ma for x in vix_data[-2:]):
-                if self.primary_asset is not None:
-                    log("EXIT: Intraday Volatility Spike. Cannon Disengaged.")
-                    self.system_lockout_counter = self.lockout_duration
-                    self.primary_asset = None
-                
-                if self.current_position != "SGOV":
-                    self.current_position = "SGOV"
-                    return TargetAllocation({"SGOV": 1.0})
-                return None
+        # --- VXX SHIELD TEMPORARILY REMOVED FOR DEBUGGING ---
 
-        # 3. DAILY SPY GOVERNOR CHECK (Macro Market Must Be Up)
+        # 2. DAILY SPY GOVERNOR CHECK (Macro Market Must Be Up)
         spy_hist = self.get_history(d, self.spy)
         spy_trend_down = self.calculate_momentum(spy_hist, self.trend_len) < 0
 
-        # 4. SCORING & SELECTION (Find the asset bleeding the most)
+        # 3. SCORING & SELECTION
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in self.tickers}
         leader = sorted(scores, key=scores.get, reverse=False)[0]
 
