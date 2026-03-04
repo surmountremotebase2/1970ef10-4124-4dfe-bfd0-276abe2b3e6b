@@ -3,12 +3,13 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (THE CANNON - 30% DEPLOYMENT) ---
-        # ACTION: High-frequency day trading state engine.
-        # DESIGN: Operates completely independent of the Core deployment to prevent GFV cross-contamination.
+        # --- NITRO SERIES K (THE CANNON v2 - 30% DEPLOYMENT) ---
+        # ACTION: Widened stops to 2.0x Hard / 4.0x Trail to fix Profit Factor bleed.
         
         self.tickers = ["TQQQ", "SOXL", "FNGU", "BITU"]
         self.safety = ["SGOV"]
+        
+        # Fixed ghost workaround to avoid VIXY ticker error in AI builder
         self.vixy = "VXX" 
         self.spy = "SPY"
 
@@ -66,7 +67,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"CANNON ACTIVE: 1-Hour Momentum, 3x ATR Tight Stops.")
+            log(f"CANNON v2 ACTIVE: 2.0x Hard Stop, 4.0x ATR Trailing Stop.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
@@ -129,8 +130,8 @@ class TradingStrategy(Strategy):
             if atr == 0:
                 atr = curr * 0.02 
             
-            # TIGHT STOPS: 1.5x Hard Stop, 3.0x Trailing Stop
-            if curr <= self.entry_price - (1.5 * atr) or curr <= self.peak_price - (3.0 * atr):
+            # WIDENED STOPS: 2.0x Hard Stop, 4.0x Trailing Stop
+            if curr <= self.entry_price - (2.0 * atr) or curr <= self.peak_price - (4.0 * atr):
                 log(f"EXIT: Cannon Stop/Trail Hit. Securing capital.")
                 self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
