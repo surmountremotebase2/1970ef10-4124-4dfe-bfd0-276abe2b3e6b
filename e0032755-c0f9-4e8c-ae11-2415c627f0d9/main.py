@@ -1,105 +1,73 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
-import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        self.tickers = ["TECL"]
+        self.tickers = ["TECL", "DFEN", "FAS"]
         
+        # Partner Adjustments
         self.vwap_len = 12 
-        self.vol_ma_len = 12 
-        self.rvol_threshold = 1.5 
-        self.trailing_stop_pct = 0.025 
-        self.tranche_weight = 1.0 
+        self.rvol_threshold = 1.8 # Increased for higher conviction
+        self.trailing_stop_pct = 0.045 # Widened to 4.5% to avoid noise
+        self.max_allocation = 0.50 # CASH ACCOUNT SHIELD: Only use 50% at a time
         
         self.active_trade = False
-        self.entry_price = None
+        self.active_ticker = None
         self.peak_price = None
-        self.initial_allocation_done = False
 
     @property
-    def interval(self):
-        return "5min"
+    def interval(self): return "5min"
 
     @property
-    def assets(self):
-        return self.tickers
-
-    def get_history(self, d, ticker):
-        history = []
-        for bar in d:
-            if ticker in bar:
-                history.append(bar[ticker])
-        return history
-
-    def calculate_vwap_and_rvol(self, history, vwap_length, vol_length):
-        if len(history) < max(vwap_length, vol_length):
-            return None, None
-            
-        df = pd.DataFrame(history)
-        
-        recent_df = df.tail(vwap_length)
-        q = recent_df['volume']
-        p = recent_df['close']
-        vwap = (p * q).sum() / q.sum()
-        
-        current_vol = df['volume'].iloc[-1]
-        avg_vol = df['volume'].tail(vol_length).mean()
-        rvol = current_vol / avg_vol if avg_vol > 0 else 0
-        
-        return vwap, rvol
+    def assets(self): return self.tickers
 
     def run(self, data):
         d = data.get("ohlcv")
         if not d: return None
         
-        if not self.initial_allocation_done:
-            self.initial_allocation_done = True
-            return TargetAllocation({}) 
-
-        tecl_hist = self.get_history(d, self.tickers[0])
-        if not tecl_hist: return None
-        
-        current_bar = tecl_hist[-1]
-        current_price = current_bar["close"]
-        current_time = current_bar.get("time", "")
-        
-        # --- EOD FLATTEN DEFENSE ---
-        # Slices the string "YYYY-MM-DD HH:MM:SS" to extract "HH:MM"
-        if current_time and len(current_time) >= 16:
-            time_hm = current_time[11:16]
-            if time_hm >= "15:50":
-                if self.active_trade:
-                    log(f"EOD FLATTEN: Liquidating TECL at {current_price} to avoid overnight risk.")
-                    self.active_trade = False
-                    self.entry_price = None
-                    self.peak_price = None
-                return TargetAllocation({}) 
-
-        # --- MANAGEMENT LOGIC ---
-        if self.active_trade:
-            self.peak_price = max(self.peak_price, current_price)
-            
-            if current_price <= self.peak_price * (1 - self.trailing_stop_pct):
-                log(f"EXIT: TECL Trailing Stop Hit at {current_price}. Peak was {self.peak_price}.")
+        # 1. EOD SHIELD (3:50 PM EST)
+        ref_bar = d[-1].get(self.tickers[0])
+        if ref_bar and "15:50" in ref_bar.get("time", ""):
+            if self.active_trade:
                 self.active_trade = False
-                self.entry_price = None
-                self.peak_price = None
+                self.active_ticker = None
                 return TargetAllocation({})
-            
             return None
 
-        # --- ENTRY LOGIC ---
-        vwap, rvol = self.calculate_vwap_and_rvol(tecl_hist, self.vwap_len, self.vol_ma_len)
+        # 2. MANAGEMENT (4.5% Trailing Stop)
+        if self.active_trade:
+            cp = d[-1][self.active_ticker]["close"]
+            self.peak_price = max(self.peak_price, cp)
+            if cp <= self.peak_price * (1 - self.trailing_stop_pct):
+                log(f"PARTNER EXIT: {self.active_ticker} Stop Hit. Protecting Capital.")
+                self.active_trade = False
+                self.active_ticker = None
+                return TargetAllocation({})
+            return None
+
+        # 3. ROTATION SCAN (RVOL & VWAP)
+        best_rvol = 0
+        target = None
         
-        if vwap and rvol and not self.active_trade:
-            if current_price > vwap and rvol >= self.rvol_threshold:
-                self.active_trade = True
-                self.entry_price = current_price
-                self.peak_price = current_price
-                log(f"ENTRY: TECL Buy Signal at {current_price}. VWAP: {vwap:.2f}, RVOL: {rvol:.2f}")
-                
-                return TargetAllocation({self.tickers[0]: self.tranche_weight})
+        for t in self.tickers:
+            hist = [bar[t] for bar in d if t in bar]
+            if len(hist) < 20: continue
+            
+            df = pd.DataFrame(hist)
+            vwap = (df['close'].tail(12) * df['volume'].tail(12)).sum() / df['volume'].tail(12).sum()
+            rvol = df['volume'].iloc[-1] / df['volume'].tail(20).mean()
+            
+            if df['close'].iloc[-1] > vwap and rvol > self.rvol_threshold:
+                if rvol > best_rvol:
+                    best_rvol = rvol
+                    target = t
+
+        if target:
+            self.active_ticker = target
+            self.active_trade = True
+            self.peak_price = d[-1][target]["close"]
+            log(f"PARTNER ENTRY: {target} | Allocation: 50% (T+1 Shield Active)")
+            return TargetAllocation({target: self.max_allocation})
 
         return None
