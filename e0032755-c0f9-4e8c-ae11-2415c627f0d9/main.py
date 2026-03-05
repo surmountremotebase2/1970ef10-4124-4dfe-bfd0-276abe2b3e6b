@@ -5,7 +5,7 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        self.tickers = ["TQQQ"]
+        self.tickers = ["TECL"]
         
         self.vwap_len = 12 
         self.vol_ma_len = 12 
@@ -58,17 +58,31 @@ class TradingStrategy(Strategy):
             self.initial_allocation_done = True
             return TargetAllocation({}) 
 
-        tqqq_hist = self.get_history(d, self.tickers[0])
-        if not tqqq_hist: return None
+        tecl_hist = self.get_history(d, self.tickers[0])
+        if not tecl_hist: return None
         
-        current_bar = tqqq_hist[-1]
+        current_bar = tecl_hist[-1]
         current_price = current_bar["close"]
+        current_time = current_bar.get("time", "")
         
+        # --- EOD FLATTEN DEFENSE ---
+        # Slices the string "YYYY-MM-DD HH:MM:SS" to extract "HH:MM"
+        if current_time and len(current_time) >= 16:
+            time_hm = current_time[11:16]
+            if time_hm >= "15:50":
+                if self.active_trade:
+                    log(f"EOD FLATTEN: Liquidating TECL at {current_price} to avoid overnight risk.")
+                    self.active_trade = False
+                    self.entry_price = None
+                    self.peak_price = None
+                return TargetAllocation({}) 
+
+        # --- MANAGEMENT LOGIC ---
         if self.active_trade:
             self.peak_price = max(self.peak_price, current_price)
             
             if current_price <= self.peak_price * (1 - self.trailing_stop_pct):
-                log(f"EXIT: TQQQ Trailing Stop Hit at {current_price}. Peak was {self.peak_price}.")
+                log(f"EXIT: TECL Trailing Stop Hit at {current_price}. Peak was {self.peak_price}.")
                 self.active_trade = False
                 self.entry_price = None
                 self.peak_price = None
@@ -76,14 +90,15 @@ class TradingStrategy(Strategy):
             
             return None
 
-        vwap, rvol = self.calculate_vwap_and_rvol(tqqq_hist, self.vwap_len, self.vol_ma_len)
+        # --- ENTRY LOGIC ---
+        vwap, rvol = self.calculate_vwap_and_rvol(tecl_hist, self.vwap_len, self.vol_ma_len)
         
         if vwap and rvol and not self.active_trade:
             if current_price > vwap and rvol >= self.rvol_threshold:
                 self.active_trade = True
                 self.entry_price = current_price
                 self.peak_price = current_price
-                log(f"ENTRY: TQQQ Buy Signal at {current_price}. VWAP: {vwap:.2f}, RVOL: {rvol:.2f}")
+                log(f"ENTRY: TECL Buy Signal at {current_price}. VWAP: {vwap:.2f}, RVOL: {rvol:.2f}")
                 
                 return TargetAllocation({self.tickers[0]: self.tranche_weight})
 
