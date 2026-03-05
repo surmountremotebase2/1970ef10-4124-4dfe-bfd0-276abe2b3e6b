@@ -3,40 +3,37 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- AGGRESSIVE GROWTH TARGET ENGINE ---
-        # Goal: Maximum capital velocity. Capture 3x ETF intraday runners.
-        
+        # --- NITRO SERIES K (DYNAMIC TRAIL + CASH ALLOCATION) ---
         self.tickers = ["TQQQ", "SOXL", "FNGU"] 
         self.safety = ["SGOV"]
         self.vixy = "VXX" 
         self.spy = "SPY"
 
-        # --- AGGRESSIVE PARAMETERS (5-Min Interval) ---
-        self.vix_ma_len = 78 # 1 Day VXX moving average (390 mins / 5)
-        self.mom_len = 8 # 40-Minute Breakout Momentum (fast trigger)
-        self.trend_len = 78 # 1 Day SPY Trend
-        self.lockout_duration = 42 # 3.5 Hour Lockout (Prevent death by chop)
+        # --- PARAMETERS (15-Min Interval) ---
+        self.vix_ma_len = 26 # 1 Day VXX moving average
+        self.mom_len = 8 # 2 Hour Breakout Momentum
+        self.trend_len = 26 # 1 Day SPY Trend
+        self.lockout_duration = 4 # 1 Hour Lockout 
+        self.atr_period = 26 # 1 Full Trading Day ATR
         
-        # --- ASYMMETRIC RISK/REWARD ---
-        self.hard_stop_pct = 0.045 # Cut loss at a strict 4.5% drop
-        self.trail_activation_pct = 0.06 # Require a 6% gain to activate trail
-        self.trail_pullback_pct = 0.025 # Trail peak by 2.5% once activated
+        # --- CASH ACCOUNT SPLIT ---
+        self.trade_weight = 0.20 # Deploy 20% on the aggressive trade
+        self.safety_weight = 0.80 # Park 80% in SGOV
         
         # State Tracking
         self.system_lockout_counter = 0
         self.primary_asset = None
         self.current_position = "SGOV" 
-        self.entry_price = 0.0
-        self.peak_price = 0.0
+        self.entry_price = None
+        self.peak_price = None
         self.debug_printed = False
 
     @property
     def interval(self):
-        return "5min" # High frequency for aggressive scaling
+        return "15min" 
 
     @property
     def assets(self):
-        # Includes VXX and SPY to prevent fetch errors (the fixed ghost workaround)
         return self.tickers + self.safety + [self.vixy, self.spy]
 
     def get_history(self, d, ticker):
@@ -45,6 +42,19 @@ class TradingStrategy(Strategy):
             if ticker in bar:
                 history.append(bar[ticker])
         return history
+
+    def calculate_atr(self, ticker_data):
+        if len(ticker_data) < self.atr_period + 1: 
+            return 0
+        data = ticker_data[-(self.atr_period + 1):]
+        true_ranges = []
+        for i in range(1, len(data)):
+            high = data[i]["high"]
+            low = data[i]["low"]
+            prev_close = data[i-1]["close"]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            true_ranges.append(tr)
+        return sum(true_ranges) / self.atr_period
 
     def calculate_momentum(self, history, length):
         if len(history) >= length:
@@ -56,10 +66,10 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"AGGRESSIVE ENGINE ACTIVE: 5-Min Timeframe. Asymmetric Risk Trailing Stop.")
+            log(f"ENGINE ACTIVE: 15-Min Timeframe. Dynamic Trail. 80/20 Cash Allocation.")
             self.debug_printed = True
 
-        # 1. CHOP LOCKOUT CHECK 
+        # 1. LOCKOUT CHECK 
         if self.system_lockout_counter > 0:
             self.system_lockout_counter -= 1
             if self.current_position != "SGOV":
@@ -67,13 +77,13 @@ class TradingStrategy(Strategy):
                 return TargetAllocation({"SGOV": 1.0})
             return None 
 
-        # 2. VXX SHIELD (Volatility Spike Defense)
+        # 2. VXX SHIELD 
         vix_data = self.get_history(d, self.vixy)
         if len(vix_data) >= self.vix_ma_len:
             vix_ma = sum([x["close"] for x in vix_data[-self.vix_ma_len:]]) / self.vix_ma_len
             if len(vix_data) >= 2 and all(x["close"] > vix_ma for x in vix_data[-2:]):
                 if self.primary_asset is not None:
-                    log("EXIT: Volatility Spike. Engine Disengaged.")
+                    log("EXIT: Intraday Volatility Spike. Disengaged.")
                     self.system_lockout_counter = self.lockout_duration
                     self.primary_asset = None
                 
@@ -82,60 +92,59 @@ class TradingStrategy(Strategy):
                     return TargetAllocation({"SGOV": 1.0})
                 return None
 
-        # 3. SPY GOVERNOR (Market must be healthy)
+        # 3. SPY GOVERNOR 
         spy_hist = self.get_history(d, self.spy)
         spy_trend_down = self.calculate_momentum(spy_hist, self.trend_len) < 0
 
-        # 4. SCORING & SELECTION (Find the fastest mover)
+        # 4. SCORING & SELECTION 
         scores = {t: self.calculate_momentum(self.get_history(d, t), self.mom_len) for t in self.tickers}
         leader = sorted(scores, key=scores.get, reverse=True)[0]
 
-        # A. ENTRY LOGIC
+        # A. ENTRY LOGIC (80/20 Split)
         if self.primary_asset is None:
-            # Entry requires positive momentum and a healthy broad market
             if scores[leader] > 0 and not spy_trend_down:
-                if self.current_position != "SGOV":
-                    self.current_position = "SGOV"
-                    return TargetAllocation({"SGOV": 1.0})
-                
                 self.primary_asset = leader
                 self.entry_price = self.get_history(d, leader)[-1]["close"]
                 self.peak_price = self.entry_price
                 self.current_position = leader
                 
-                log(f"ENTRY: Firing on {leader} at {self.entry_price}")
-                return TargetAllocation({leader: 1.0})
+                log(f"ENTRY: Firing on {leader} at {self.entry_price} with 20% allocation")
+                return TargetAllocation({leader: self.trade_weight, "SGOV": self.safety_weight})
             else:
                 if self.current_position != "SGOV":
                     self.current_position = "SGOV"
                     return TargetAllocation({"SGOV": 1.0})
                 return None
 
-        # B. ASYMMETRIC MANAGEMENT LOGIC
+        # B. MANAGEMENT LOGIC (Dynamic Trailing Stop)
         p_hist = self.get_history(d, self.primary_asset)
         if p_hist:
             curr = p_hist[-1]["close"]
             self.peak_price = max(self.peak_price, curr)
             
-            gain_from_entry = (curr - self.entry_price) / self.entry_price
-            drop_from_peak = (self.peak_price - curr) / self.peak_price
-
-            # THE RUNNER CAPTURE: Dynamic Trailing Stop
-            if gain_from_entry >= self.trail_activation_pct:
-                if drop_from_peak >= self.trail_pullback_pct:
-                    log(f"TAKE PROFIT: Trailing stop secured runner on {self.primary_asset} at {curr}.")
-                    self.system_lockout_counter = self.lockout_duration # Cool down after a win
+            atr = self.calculate_atr(p_hist)
+            if atr == 0:
+                atr = curr * 0.02 
+            
+            # --- ASYMMETRIC TRAILING STOP ---
+            # Wait for a 5% gain before activating the trail
+            if curr >= self.entry_price * 1.05:
+                # Once activated, exit if price drops 2.5% from the peak
+                if curr <= self.peak_price * 0.975:
+                    log(f"TAKE PROFIT: Trailing stop triggered on {self.primary_asset} at {curr}. Securing cash.")
+                    self.system_lockout_counter = self.lockout_duration
                     self.primary_asset = None
                     if self.current_position != "SGOV":
                         self.current_position = "SGOV"
                         return TargetAllocation({"SGOV": 1.0})
                     return None
 
-            # THE FLOOR: Absolute Hard Stop
-            if gain_from_entry <= -self.hard_stop_pct:
-                log(f"EXIT: Hard Stop Hit on {self.primary_asset}. Cutting loss.")
-                self.system_lockout_counter = self.lockout_duration # 3.5 hour penalty box for a bad trade
+            # --- SAFETY NET: 1.5x Hard Stop ---
+            if curr <= self.entry_price - (1.5 * atr):
+                log(f"EXIT: Hard Stop Hit on {self.primary_asset}. Cutting losses.")
+                self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
+                
                 if self.current_position != "SGOV":
                     self.current_position = "SGOV"
                     return TargetAllocation({"SGOV": 1.0})
