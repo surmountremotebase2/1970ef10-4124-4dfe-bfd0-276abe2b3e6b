@@ -3,18 +3,18 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (DYNAMIC TRAIL + CASH ALLOCATION) ---
+        # --- NITRO SERIES K (DYNAMIC TRAIL + CASH ACCOUNT FIX) ---
         self.tickers = ["TQQQ", "SOXL", "FNGU"] 
         self.safety = ["SGOV"]
         self.vixy = "VXX" 
         self.spy = "SPY"
 
-        # --- PARAMETERS (15-Min Interval) ---
-        self.vix_ma_len = 26 # 1 Day VXX moving average
-        self.mom_len = 8 # 2 Hour Breakout Momentum
-        self.trend_len = 26 # 1 Day SPY Trend
-        self.lockout_duration = 4 # 1 Hour Lockout 
-        self.atr_period = 26 # 1 Full Trading Day ATR
+        # --- PARAMETERS (Recalibrated for 5-Min Interval) ---
+        self.vix_ma_len = 78 # 1 Day VXX moving average (390 mins / 5)
+        self.mom_len = 24 # 2 Hour Breakout Momentum (120 mins / 5)
+        self.trend_len = 78 # 1 Day SPY Trend
+        self.lockout_duration = 12 # 1 Hour Lockout (60 mins / 5)
+        self.atr_period = 78 # 1 Full Trading Day ATR
         
         # --- CASH ACCOUNT SPLIT ---
         self.trade_weight = 0.20 # Deploy 20% on the aggressive trade
@@ -30,10 +30,11 @@ class TradingStrategy(Strategy):
 
     @property
     def interval(self):
-        return "15min" 
+        return "5min" # Reverted to 5min to prevent backend fetch errors
 
     @property
     def assets(self):
+        # Includes VXX and SPY to satisfy the fixed ghost workaround
         return self.tickers + self.safety + [self.vixy, self.spy]
 
     def get_history(self, d, ticker):
@@ -66,7 +67,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"ENGINE ACTIVE: 15-Min Timeframe. Dynamic Trail. 80/20 Cash Allocation.")
+            log(f"ENGINE ACTIVE: 5-Min Timeframe. Dynamic Trail. 80/20 Cash Allocation.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
