@@ -3,7 +3,7 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (FIXED PERCENTAGE STOPS + 80/20 SPLIT) ---
+        # --- NITRO SERIES K (WIDENED % STOPS + 80/20 SPLIT) ---
         self.tickers = ["TQQQ", "SOXL", "FNGU"] 
         self.safety = ["SGOV"]
         self.vixy = "VXX" 
@@ -53,7 +53,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"ENGINE ACTIVE: 5-Min. Fixed % Trail. Entry-Only VXX. 80/20 Split.")
+            log(f"ENGINE ACTIVE: 5-Min. Widened % Trail. Entry-Only VXX. 80/20 Split.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
@@ -97,7 +97,7 @@ class TradingStrategy(Strategy):
                     return TargetAllocation({"SGOV": 1.0})
                 return None
 
-        # B. MANAGEMENT LOGIC (Fixed Percentage Stops)
+        # B. MANAGEMENT LOGIC (Widened Fixed Percentage Stops)
         p_hist = self.get_history(d, self.primary_asset)
         if p_hist:
             curr = p_hist[-1]["close"]
@@ -108,10 +108,10 @@ class TradingStrategy(Strategy):
             drop_from_peak = (self.peak_price - curr) / self.peak_price
 
             # --- ASYMMETRIC TRAILING STOP ---
-            # Wait for a 4% gain before activating the trail
-            if gain_from_entry >= 0.04:
-                # Once activated, exit if price drops 2% from the highest peak
-                if drop_from_peak >= 0.02:
+            # Wait for a 7% gain before activating the trail
+            if gain_from_entry >= 0.07:
+                # Once activated, exit if price drops 2.5% from the highest peak
+                if drop_from_peak >= 0.025:
                     log(f"TAKE PROFIT: Trailing stop triggered on {self.primary_asset} at {curr}. Securing cash.")
                     self.system_lockout_counter = self.lockout_duration
                     self.primary_asset = None
@@ -120,8 +120,8 @@ class TradingStrategy(Strategy):
                         return TargetAllocation({"SGOV": 1.0})
                     return None
 
-            # --- SAFETY NET: 3% Fixed Hard Stop ---
-            if gain_from_entry <= -0.03:
+            # --- SAFETY NET: 5% Fixed Hard Stop ---
+            if gain_from_entry <= -0.05:
                 log(f"EXIT: Hard Stop Hit on {self.primary_asset}. Cutting losses.")
                 self.system_lockout_counter = self.lockout_duration
                 self.primary_asset = None
