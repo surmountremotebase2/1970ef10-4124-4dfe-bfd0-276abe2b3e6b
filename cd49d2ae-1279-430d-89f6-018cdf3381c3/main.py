@@ -3,7 +3,7 @@ from surmount.logging import log
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # --- NITRO SERIES K (WIDENED % STOPS + 80/20 SPLIT) ---
+        # --- NITRO SERIES K (FAST TRIGGER + 80/20 SPLIT) ---
         self.tickers = ["TQQQ", "SOXL", "FNGU"] 
         self.safety = ["SGOV"]
         self.vixy = "VXX" 
@@ -11,7 +11,10 @@ class TradingStrategy(Strategy):
 
         # --- PARAMETERS (5-Min Interval) ---
         self.vix_ma_len = 78 # 1 Day VXX moving average (390 mins / 5)
-        self.mom_len = 24 # 2 Hour Breakout Momentum (120 mins / 5)
+        
+        # THE FIX: Fast Trigger. Shortened from 2 hours down to 30 minutes.
+        self.mom_len = 6 # 30-Minute Breakout Momentum (30 mins / 5)
+        
         self.trend_len = 78 # 1 Day SPY Trend
         self.lockout_duration = 12 # 1 Hour Lockout (60 mins / 5)
         
@@ -53,7 +56,7 @@ class TradingStrategy(Strategy):
         if not d: return None
         
         if not self.debug_printed:
-            log(f"ENGINE ACTIVE: 5-Min. Widened % Trail. Entry-Only VXX. 80/20 Split.")
+            log(f"ENGINE ACTIVE: 5-Min. Fast Trigger (30m). Entry-Only VXX. 80/20 Split.")
             self.debug_printed = True
 
         # 1. LOCKOUT CHECK 
@@ -82,7 +85,7 @@ class TradingStrategy(Strategy):
 
         # A. ENTRY LOGIC 
         if self.primary_asset is None:
-            # Entry requires positive momentum, an uptrending SPY, AND a quiet VXX
+            # Entry requires positive 30-minute momentum, uptrending SPY, AND quiet VXX
             if scores[leader] > 0 and not spy_trend_down and not vix_spike:
                 self.primary_asset = leader
                 self.entry_price = self.get_history(d, leader)[-1]["close"]
