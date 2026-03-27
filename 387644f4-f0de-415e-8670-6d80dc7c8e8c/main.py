@@ -10,10 +10,10 @@ class TradingStrategy(Strategy):
        
         # Core Engine Parameters
         self.vwap_len = 12
-        self.rvol_threshold = 1.8 # Requires 80% volume spike to trigger entry
-        self.trailing_stop_pct = 0.08 # 8% Swing buffer to survive morning gaps
-        self.take_profit_pct = 0.10 # 10% Offensive exit to lock in violent spikes
-        self.max_allocation = 0.50 # 50% Tranche to maintain T+1 cash settlement compliance
+        self.rvol_threshold = 1.8 
+        self.trailing_stop_pct = 0.08 
+        self.take_profit_pct = 0.10 
+        self.max_allocation = 0.50 
        
         self.active_trade = False
         self.active_ticker = None
@@ -27,9 +27,8 @@ class TradingStrategy(Strategy):
     def assets(self): return self.tickers
 
     def get_conviction_score(self, history):
-        """Evaluates trend and volume to find the most aggressive institutional buying."""
-        # Require 390 bars (5 full trading days) to calculate the macro trend
-        if len(history) < 390: return 0
+        # Lowered to 78 bars to ensure we don't exceed the platform's memory buffer
+        if len(history) < 78: return 0
         df = pd.DataFrame(history)
        
         # VWAP calculation (12-period)
@@ -41,10 +40,10 @@ class TradingStrategy(Strategy):
         avg_vol = df['volume'].tail(20).mean()
         rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
        
-        # Macro Trend Check (Price must be above 5-day/390-bar SMA)
-        sma_macro = df['close'].tail(390).mean()
+        # Macro Trend Check (Calculates the mean over the max available rolling buffer)
+        sma_macro = df['close'].mean()
        
-        # Asset must be above VWAP and the 5-day SMA to filter out dead-cat bounces
+        # Asset must be above VWAP and the rolling SMA to filter out dead-cat bounces
         if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold:
             return rvol
         return 0
