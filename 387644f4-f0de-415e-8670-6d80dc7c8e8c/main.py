@@ -6,7 +6,7 @@ import numpy as np
 class TradingStrategy(Strategy):
     def __init__(self):
         # Final 2026 Macro Roster (Leveraged Equities & Commodities)
-        self.tickers = ["TECL", "GDXU", "DFEN", "SOXL", "UPRO", "UCO", "AGQ"]
+        self.tickers = ["TECL", "GDXU", "SOXL", "UPRO", "UCO", "AGQ"]
        
         # Core Engine Parameters
         self.vwap_len = 12
