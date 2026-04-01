@@ -19,6 +19,7 @@ class TradingStrategy(Strategy):
         self.active_ticker = None
         self.peak_price = None
         self.entry_price = None
+        self.scaled_out = False # Tracks if we have secured the initial 10% profit
 
     @property
     def interval(self): return "5min"
@@ -52,7 +53,7 @@ class TradingStrategy(Strategy):
         d = data.get("ohlcv")
         if not d: return None
        
-        # --- 1. SWING MANAGEMENT (10% Take-Profit & 8% Trailing Stop) ---
+        # --- 1. SWING MANAGEMENT (50% Scale-Out & 8% Trailing Stop) ---
         if self.active_trade:
             current_bar = d[-1].get(self.active_ticker)
             if not current_bar: return None
@@ -63,14 +64,12 @@ class TradingStrategy(Strategy):
             if self.peak_price is None or cp > self.peak_price:
                 self.peak_price = cp
            
-            # OFFENSIVE EXIT: Lock in 10% hard gain
-            if self.entry_price and cp >= self.entry_price * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {self.active_ticker} exit at {cp}. Secured 10% gain.")
-                self.active_trade = False
-                self.active_ticker = None
-                self.peak_price = None
-                self.entry_price = None
-                return TargetAllocation({})
+            # OFFENSIVE EXIT: Scale out 50% at 10% hard gain
+            if not self.scaled_out and self.entry_price and cp >= self.entry_price * (1 + self.take_profit_pct):
+                log(f"SCALE OUT: {self.active_ticker} hit 10% target at {cp}. Securing half position.")
+                self.scaled_out = True
+                # Hardcoded 0.25 to prevent the backtester from crashing on dynamic math
+                return TargetAllocation({self.active_ticker: 0.25})
 
             # DEFENSIVE EXIT: 8% Trailing Stop
             if cp <= self.peak_price * (1 - self.trailing_stop_pct):
@@ -79,6 +78,7 @@ class TradingStrategy(Strategy):
                 self.active_ticker = None
                 self.peak_price = None
                 self.entry_price = None
+                self.scaled_out = False # Reset for the next trade
                 return TargetAllocation({})
            
             # Hold position overnight
@@ -100,6 +100,7 @@ class TradingStrategy(Strategy):
             self.active_trade = True
             self.peak_price = d[-1][best_ticker]["close"]
             self.entry_price = d[-1][best_ticker]["close"]
+            self.scaled_out = False # Ensure flag is reset on fresh entry
            
             log(f"SWING ENTRY: {best_ticker} | RVOL: {scores[best_ticker]:.2f} | Entry: {self.entry_price}")
             return TargetAllocation({best_ticker: self.max_allocation})
