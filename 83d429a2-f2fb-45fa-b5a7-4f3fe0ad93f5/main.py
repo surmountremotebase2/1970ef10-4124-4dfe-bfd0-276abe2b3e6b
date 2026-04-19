@@ -5,11 +5,8 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # The Unrestricted Day Trade Roster
-        self.tickers = ["SOXL", "GDXU", "AGQ"]
-        
-        # Native Macro Data Feeds for Surmount
-        self.data_list = [{"ticker": "SPY"}, {"ticker": "VIXY"}]
+        # We put ALL tickers here so Surmount pulls their OHLCV data
+        self.tickers = ["SOXL", "GDXU", "AGQ", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
@@ -29,9 +26,6 @@ class TradingStrategy(Strategy):
 
     @property
     def assets(self): return self.tickers
-
-    @property
-    def data(self): return self.data_list
 
     def get_atr(self, df, period=14):
         high_low = df['high'] - df['low']
@@ -60,6 +54,7 @@ class TradingStrategy(Strategy):
         vixy_sma = vixy_df['close'].rolling(20).mean().iloc[-1]
         vixy_current = vixy_df['close'].iloc[-1]
         
+        # Determine macro conditions
         if spy_current > spy_sma and vixy_current < vixy_sma:
             return "RISK_ON"
         elif spy_current <= spy_sma or vixy_current >= vixy_sma:
@@ -121,6 +116,7 @@ class TradingStrategy(Strategy):
 
         # --- 3. EXECUTION ---
         scores = {}
+        # Ensure we only iterate over the targeted tradeable assets, ignoring SPY and VIXY
         for t in allowed_tickers:
             hist = [bar[t] for bar in d if t in bar]
             if len(hist) < 20: continue
