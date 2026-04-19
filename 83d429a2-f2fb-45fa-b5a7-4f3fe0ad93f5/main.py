@@ -5,8 +5,8 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # The Execution Roster + Macro Feeds (IBIT removed for isolation test)
-        self.tickers = ["SOXL", "GDXU", "AGQ", "SPY", "VIXY"]
+        # Finalized Execution Roster + Macro Feeds
+        self.tickers = ["SOXL", "TNA", "FAS", "GDXU", "AGQ", "ERX", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
@@ -111,15 +111,15 @@ class TradingStrategy(Strategy):
         regime = self.market_regime_check(data)
         
         if regime == "FLAT":
-            return None
+            return TargetAllocation({}) if not self.active_trade else None
             
         allowed_tickers = []
         if regime == "RISK_ON":
-            allowed_tickers = ["SOXL"] 
+            allowed_tickers = ["SOXL", "TNA", "FAS"] 
         elif regime == "RISK_OFF":
-            allowed_tickers = ["GDXU", "AGQ"] 
+            allowed_tickers = ["GDXU", "AGQ", "ERX"] 
 
-        # --- 3. EXECUTION ---
+        # --- 3. EXECUTION WITH BUYING PRESSURE LOGIC ---
         scores = {}
         for t in allowed_tickers:
             hist = [bar[t] for bar in d if t in bar]
@@ -127,13 +127,25 @@ class TradingStrategy(Strategy):
             
             df_t = pd.DataFrame(hist)
             vwap = (df_t['close'].tail(self.vwap_len) * df_t['volume'].tail(self.vwap_len)).sum() / df_t['volume'].tail(self.vwap_len).sum()
+            
             cp = df_t['close'].iloc[-1]
+            op = df_t['open'].iloc[-1]
+            high = df_t['high'].iloc[-1]
+            low = df_t['low'].iloc[-1]
             
             avg_vol = df_t['volume'].tail(20).mean()
             rvol = df_t['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
             
-            if cp > vwap and rvol >= self.rvol_threshold:
-                scores[t] = rvol
+            # Require green candle and price above VWAP
+            if cp > op and cp > vwap and rvol >= self.rvol_threshold:
+                candle_range = high - low
+                if candle_range > 0:
+                    buying_pressure = (cp - low) / candle_range
+                else:
+                    buying_pressure = 0
+                
+                # Composite Score
+                scores[t] = rvol * buying_pressure
         
         if scores:
             best_ticker = max(scores, key=scores.get)
@@ -145,7 +157,7 @@ class TradingStrategy(Strategy):
             self.peak_price = d[-1][best_ticker]["close"]
             self.current_atr = self.get_atr(df_best)
             
-            log(f"ENTRY: {best_ticker} | Regime: {regime}")
+            log(f"ENTRY: {best_ticker} | Regime: {regime} | Score: {scores[best_ticker]:.2f}")
             return TargetAllocation({best_ticker: self.max_allocation})
 
         return None
