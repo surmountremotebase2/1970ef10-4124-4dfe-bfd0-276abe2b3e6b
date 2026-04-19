@@ -5,8 +5,8 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # The Execution Roster + Macro Feeds
-        self.tickers = ["SOXL", "GDXU", "AGQ", "IBIT", "SPY", "VIXY"]
+        # The Execution Roster + Macro Feeds (IBIT removed for isolation test)
+        self.tickers = ["SOXL", "GDXU", "AGQ", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
@@ -115,7 +115,7 @@ class TradingStrategy(Strategy):
             
         allowed_tickers = []
         if regime == "RISK_ON":
-            allowed_tickers = ["SOXL", "IBIT"] 
+            allowed_tickers = ["SOXL"] 
         elif regime == "RISK_OFF":
             allowed_tickers = ["GDXU", "AGQ"] 
 
