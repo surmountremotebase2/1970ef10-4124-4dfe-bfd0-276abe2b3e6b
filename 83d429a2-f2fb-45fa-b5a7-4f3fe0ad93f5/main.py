@@ -5,8 +5,8 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # We put ALL tickers here so Surmount pulls their OHLCV data
-        self.tickers = ["SOXL", "GDXU", "AGQ", "SPY", "VIXY"]
+        # Expanded Macro Roster + Data Feeds
+        self.tickers = ["SOXL", "TQQQ", "UPRO", "GDXU", "AGQ", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
@@ -54,7 +54,6 @@ class TradingStrategy(Strategy):
         vixy_sma = vixy_df['close'].rolling(20).mean().iloc[-1]
         vixy_current = vixy_df['close'].iloc[-1]
         
-        # Determine macro conditions
         if spy_current > spy_sma and vixy_current < vixy_sma:
             return "RISK_ON"
         elif spy_current <= spy_sma or vixy_current >= vixy_sma:
@@ -75,6 +74,8 @@ class TradingStrategy(Strategy):
             minute = 0
             
         is_eod = (hour == 15 and minute >= 55)
+        # The Midday Chop Block - Critical for a wide roster
+        is_midday_chop = (hour == 11 and minute >= 30) or (hour == 12) or (hour == 13)
 
         # --- 1. INTRADAY MANAGEMENT (ATR Trailing Stop & EOD) ---
         if self.active_trade:
@@ -103,6 +104,9 @@ class TradingStrategy(Strategy):
             return None
 
         # --- 2. THE MACRO ROTATION FILTER ---
+        if is_eod or is_midday_chop:
+            return None
+
         regime = self.market_regime_check(data)
         
         if regime == "FLAT":
@@ -110,13 +114,12 @@ class TradingStrategy(Strategy):
             
         allowed_tickers = []
         if regime == "RISK_ON":
-            allowed_tickers = ["SOXL"] 
+            allowed_tickers = ["SOXL", "TQQQ", "UPRO"] 
         elif regime == "RISK_OFF":
             allowed_tickers = ["GDXU", "AGQ"] 
 
         # --- 3. EXECUTION ---
         scores = {}
-        # Ensure we only iterate over the targeted tradeable assets, ignoring SPY and VIXY
         for t in allowed_tickers:
             hist = [bar[t] for bar in d if t in bar]
             if len(hist) < 20: continue
