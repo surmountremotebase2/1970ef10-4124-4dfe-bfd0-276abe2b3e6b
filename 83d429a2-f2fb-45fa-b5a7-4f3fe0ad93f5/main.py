@@ -5,8 +5,8 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Expanded Macro Roster + Data Feeds
-        self.tickers = ["SOXL", "TQQQ", "UPRO", "GDXU", "AGQ", "SPY", "VIXY"]
+        # The Execution Roster + Macro Feeds
+        self.tickers = ["SOXL", "GDXU", "AGQ", "IBIT", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
@@ -74,25 +74,26 @@ class TradingStrategy(Strategy):
             minute = 0
             
         is_eod = (hour == 15 and minute >= 55)
-        # The Midday Chop Block - Critical for a wide roster
         is_midday_chop = (hour == 11 and minute >= 30) or (hour == 12) or (hour == 13)
 
         # --- 1. INTRADAY MANAGEMENT (ATR Trailing Stop & EOD) ---
         if self.active_trade:
             current_bar = d[-1].get(self.active_ticker)
-            if not current_bar: return None
+            if not current_bar: return TargetAllocation({})
             
             cp = current_bar["close"]
             
             if self.peak_price is None or cp > self.peak_price:
                 self.peak_price = cp
 
+            # EOD LIQUIDATION: Return to pure cash overnight
             if is_eod:
                 log(f"EOD LIQUIDATION: {self.active_ticker}. Flattening book.")
                 self.active_trade = False
                 self.active_ticker = None
                 return TargetAllocation({})
 
+            # ATR STOP: Liquidate to pure cash
             if self.current_atr:
                 stop_loss_price = self.peak_price - (self.current_atr * self.atr_multiplier)
                 if cp <= stop_loss_price:
@@ -105,7 +106,7 @@ class TradingStrategy(Strategy):
 
         # --- 2. THE MACRO ROTATION FILTER ---
         if is_eod or is_midday_chop:
-            return None
+            return None 
 
         regime = self.market_regime_check(data)
         
@@ -114,7 +115,7 @@ class TradingStrategy(Strategy):
             
         allowed_tickers = []
         if regime == "RISK_ON":
-            allowed_tickers = ["SOXL", "TQQQ", "UPRO"] 
+            allowed_tickers = ["SOXL", "IBIT"] 
         elif regime == "RISK_OFF":
             allowed_tickers = ["GDXU", "AGQ"] 
 
