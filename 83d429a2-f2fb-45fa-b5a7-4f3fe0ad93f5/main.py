@@ -5,13 +5,12 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Finalized Execution Roster + Macro Feeds
+        # 6-Asset Execution Roster + Macro Feeds
         self.tickers = ["SOXL", "TNA", "FAS", "GDXU", "AGQ", "ERX", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
         self.spy_sma_len = 50
-        self.rvol_threshold = 1.8
         self.max_allocation = 1.00 
         
         # Dynamic Risk Management
@@ -119,35 +118,34 @@ class TradingStrategy(Strategy):
         elif regime == "RISK_OFF":
             allowed_tickers = ["GDXU", "AGQ", "ERX"] 
 
-        # --- 3. EXECUTION WITH BUYING PRESSURE LOGIC ---
+        # --- 3. EXECUTION WITH RS RANKING ---
         scores = {}
         for t in allowed_tickers:
             hist = [bar[t] for bar in d if t in bar]
             if len(hist) < 20: continue
             
             df_t = pd.DataFrame(hist)
+            df_t['date'] = pd.to_datetime(df_t['date'])
+            
             vwap = (df_t['close'].tail(self.vwap_len) * df_t['volume'].tail(self.vwap_len)).sum() / df_t['volume'].tail(self.vwap_len).sum()
-            
             cp = df_t['close'].iloc[-1]
-            op = df_t['open'].iloc[-1]
-            high = df_t['high'].iloc[-1]
-            low = df_t['low'].iloc[-1]
             
-            avg_vol = df_t['volume'].tail(20).mean()
-            rvol = df_t['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
+            # Identify the opening price of the current day
+            current_day = df_t['date'].dt.date.iloc[-1]
+            today_data = df_t[df_t['date'].dt.date == current_day]
             
-            # Require green candle and price above VWAP
-            if cp > op and cp > vwap and rvol >= self.rvol_threshold:
-                candle_range = high - low
-                if candle_range > 0:
-                    buying_pressure = (cp - low) / candle_range
-                else:
-                    buying_pressure = 0
-                
-                # Composite Score
-                scores[t] = rvol * buying_pressure
+            if today_data.empty: continue
+            day_open = today_data['open'].iloc[0]
+            
+            # Calculate Intraday Relative Strength
+            rs_score = (cp - day_open) / day_open
+            
+            # The asset must be positive on the day AND trading above VWAP to avoid false rallies
+            if rs_score > 0 and cp > vwap:
+                scores[t] = rs_score
         
         if scores:
+            # Execute 100% allocation on the highest ranked asset
             best_ticker = max(scores, key=scores.get)
             hist = [bar[best_ticker] for bar in d if best_ticker in bar]
             df_best = pd.DataFrame(hist)
@@ -157,7 +155,7 @@ class TradingStrategy(Strategy):
             self.peak_price = d[-1][best_ticker]["close"]
             self.current_atr = self.get_atr(df_best)
             
-            log(f"ENTRY: {best_ticker} | Regime: {regime} | Score: {scores[best_ticker]:.2f}")
+            log(f"ENTRY: {best_ticker} | Regime: {regime} | RS Score: {scores[best_ticker]:.4f}")
             return TargetAllocation({best_ticker: self.max_allocation})
 
         return None
