@@ -1,8 +1,4 @@
-From: Joshua Sullivan <sully2240@hotmail.com>
-Sent: Sunday, April 19, 2026 4:44 PM
-To: Joshua Sullivan <sully2240@hotmail.com>
-Subject: Re: Re:
- 
+>
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
