@@ -1,3 +1,8 @@
+From: Joshua Sullivan <sully2240@hotmail.com>
+Sent: Sunday, April 19, 2026 4:44 PM
+To: Joshua Sullivan <sully2240@hotmail.com>
+Subject: Re: Re:
+ 
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
@@ -5,12 +10,13 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # 6-Asset Execution Roster + Macro Feeds
-        self.tickers = ["SOXL", "TNA", "FAS", "GDXU", "AGQ", "ERX", "SPY", "VIXY"]
+        # We put ALL tickers here so Surmount pulls their OHLCV data
+        self.tickers = ["SOXL", "GDXU", "AGQ", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
         self.spy_sma_len = 50
+        self.rvol_threshold = 1.8
         self.max_allocation = 1.00 
         
         # Dynamic Risk Management
@@ -53,6 +59,7 @@ class TradingStrategy(Strategy):
         vixy_sma = vixy_df['close'].rolling(20).mean().iloc[-1]
         vixy_current = vixy_df['close'].iloc[-1]
         
+        # Determine macro conditions
         if spy_current > spy_sma and vixy_current < vixy_sma:
             return "RISK_ON"
         elif spy_current <= spy_sma or vixy_current >= vixy_sma:
@@ -73,26 +80,23 @@ class TradingStrategy(Strategy):
             minute = 0
             
         is_eod = (hour == 15 and minute >= 55)
-        is_midday_chop = (hour == 11 and minute >= 30) or (hour == 12) or (hour == 13)
 
         # --- 1. INTRADAY MANAGEMENT (ATR Trailing Stop & EOD) ---
         if self.active_trade:
             current_bar = d[-1].get(self.active_ticker)
-            if not current_bar: return TargetAllocation({})
+            if not current_bar: return None
             
             cp = current_bar["close"]
             
             if self.peak_price is None or cp > self.peak_price:
                 self.peak_price = cp
 
-            # EOD LIQUIDATION: Return to pure cash overnight
             if is_eod:
                 log(f"EOD LIQUIDATION: {self.active_ticker}. Flattening book.")
                 self.active_trade = False
                 self.active_ticker = None
                 return TargetAllocation({})
 
-            # ATR STOP: Liquidate to pure cash
             if self.current_atr:
                 stop_loss_price = self.peak_price - (self.current_atr * self.atr_multiplier)
                 if cp <= stop_loss_price:
@@ -104,48 +108,35 @@ class TradingStrategy(Strategy):
             return None
 
         # --- 2. THE MACRO ROTATION FILTER ---
-        if is_eod or is_midday_chop:
-            return None 
-
         regime = self.market_regime_check(data)
         
         if regime == "FLAT":
-            return TargetAllocation({}) if not self.active_trade else None
+            return None
             
         allowed_tickers = []
         if regime == "RISK_ON":
-            allowed_tickers = ["SOXL", "TNA", "FAS"] 
+            allowed_tickers = ["SOXL"] 
         elif regime == "RISK_OFF":
-            allowed_tickers = ["GDXU", "AGQ", "ERX"] 
+            allowed_tickers = ["GDXU", "AGQ"] 
 
-        # --- 3. EXECUTION WITH RS RANKING ---
+        # --- 3. EXECUTION ---
         scores = {}
+        # Ensure we only iterate over the targeted tradeable assets, ignoring SPY and VIXY
         for t in allowed_tickers:
             hist = [bar[t] for bar in d if t in bar]
             if len(hist) < 20: continue
             
             df_t = pd.DataFrame(hist)
-            df_t['date'] = pd.to_datetime(df_t['date'])
-            
             vwap = (df_t['close'].tail(self.vwap_len) * df_t['volume'].tail(self.vwap_len)).sum() / df_t['volume'].tail(self.vwap_len).sum()
             cp = df_t['close'].iloc[-1]
             
-            # Identify the opening price of the current day
-            current_day = df_t['date'].dt.date.iloc[-1]
-            today_data = df_t[df_t['date'].dt.date == current_day]
+            avg_vol = df_t['volume'].tail(20).mean()
+            rvol = df_t['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
             
-            if today_data.empty: continue
-            day_open = today_data['open'].iloc[0]
-            
-            # Calculate Intraday Relative Strength
-            rs_score = (cp - day_open) / day_open
-            
-            # The asset must be positive on the day AND trading above VWAP to avoid false rallies
-            if rs_score > 0 and cp > vwap:
-                scores[t] = rs_score
+            if cp > vwap and rvol >= self.rvol_threshold:
+                scores[t] = rvol
         
         if scores:
-            # Execute 100% allocation on the highest ranked asset
             best_ticker = max(scores, key=scores.get)
             hist = [bar[best_ticker] for bar in d if best_ticker in bar]
             df_best = pd.DataFrame(hist)
@@ -155,7 +146,7 @@ class TradingStrategy(Strategy):
             self.peak_price = d[-1][best_ticker]["close"]
             self.current_atr = self.get_atr(df_best)
             
-            log(f"ENTRY: {best_ticker} | Regime: {regime} | RS Score: {scores[best_ticker]:.4f}")
+            log(f"ENTRY: {best_ticker} | Regime: {regime}")
             return TargetAllocation({best_ticker: self.max_allocation})
 
         return None
