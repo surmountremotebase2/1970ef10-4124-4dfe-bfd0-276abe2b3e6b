@@ -8,28 +8,33 @@ class TradingStrategy(Strategy):
         self.tickers = ["SOXL", "GDXU", "AGQ", "SPY", "VIXY"]
         
         # Engine Parameters
-        self.vwap_len = 60 # Extended to 60 to reflect 1 hour of data on a 1-min chart
+        self.vwap_len = 12
         self.spy_sma_len = 50
         self.rvol_threshold = 1.8
         self.max_allocation = 1.00 
         
-        # Percentage-Based Risk Management
-        self.take_profit_pct = 1.05 # Hard 5% take-profit target
-        self.trailing_stop_pct = 0.015 # Tight 1.5% trailing stop
-        
-        # State Management
+        # Dynamic Risk Management
+        self.atr_multiplier = 1.5 # Tightened from 2.0 to 1.5 to compress drawdown
         self.active_trade = False
         self.active_ticker = None
-        self.entry_price = None
         self.peak_price = None
+        self.current_atr = None
 
     @property
     def interval(self): 
-        return "1min"
+        return "5min"
 
     @property
     def assets(self): 
         return self.tickers
+
+    def get_atr(self, df, period=14):
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = np.max(ranges, axis=1)
+        return true_range.rolling(period).mean().iloc[-1]
 
     def market_regime_check(self, data):
         d = data.get("ohlcv")
@@ -69,10 +74,11 @@ class TradingStrategy(Strategy):
             hour = 10
             minute = 0
             
-        is_eod = (hour == 15 and minute >= 50) # Liquidate 10 minutes before close
+        is_eod = (hour == 15 and minute >= 55)
+        # Re-introduced Midday Chop Filter
         is_midday_chop = (hour == 11 and minute >= 30) or (hour == 12) or (hour == 13)
 
-        # --- 1. INTRADAY MANAGEMENT (Percentage Stops & EOD) ---
+        # --- 1. INTRADAY MANAGEMENT (ATR Trailing Stop & EOD) ---
         if self.active_trade:
             current_bar = d[-1].get(self.active_ticker)
             if not current_bar: return None
@@ -82,36 +88,25 @@ class TradingStrategy(Strategy):
             if self.peak_price is None or cp > self.peak_price:
                 self.peak_price = cp
 
-            # EOD LIQUIDATION
             if is_eod:
                 log(f"EOD LIQUIDATION: {self.active_ticker}. Flattening book.")
                 self.active_trade = False
                 self.active_ticker = None
-                self.entry_price = None
                 return TargetAllocation({})
 
-            # TAKE PROFIT (5%)
-            if cp >= self.entry_price * self.take_profit_pct:
-                log(f"TAKE PROFIT HIT: {self.active_ticker} exited at {cp} (+5%).")
-                self.active_trade = False
-                self.active_ticker = None
-                self.entry_price = None
-                return TargetAllocation({})
-            
-            # TRAILING STOP (1.5% from peak)
-            stop_loss_price = self.peak_price * (1 - self.trailing_stop_pct)
-            if cp <= stop_loss_price:
-                log(f"TRAILING STOP: {self.active_ticker} exited at {cp}.")
-                self.active_trade = False
-                self.active_ticker = None
-                self.entry_price = None
-                return TargetAllocation({}) 
+            if self.current_atr:
+                stop_loss_price = self.peak_price - (self.current_atr * self.atr_multiplier)
+                if cp <= stop_loss_price:
+                    log(f"ATR STOP: {self.active_ticker} exit at {cp}.")
+                    self.active_trade = False
+                    self.active_ticker = None
+                    return TargetAllocation({}) 
             
             return None
 
         # --- 2. THE MACRO ROTATION FILTER ---
         if is_eod or is_midday_chop:
-            return None
+            return None 
 
         regime = self.market_regime_check(data)
         
@@ -128,7 +123,7 @@ class TradingStrategy(Strategy):
         scores = {}
         for t in allowed_tickers:
             hist = [bar[t] for bar in d if t in bar]
-            if len(hist) < 60: continue # Need 60 minutes for VWAP calculation
+            if len(hist) < 20: continue
             
             df_t = pd.DataFrame(hist)
             vwap = (df_t['close'].tail(self.vwap_len) * df_t['volume'].tail(self.vwap_len)).sum() / df_t['volume'].tail(self.vwap_len).sum()
@@ -142,13 +137,15 @@ class TradingStrategy(Strategy):
         
         if scores:
             best_ticker = max(scores, key=scores.get)
+            hist = [bar[best_ticker] for bar in d if best_ticker in bar]
+            df_best = pd.DataFrame(hist)
             
             self.active_ticker = best_ticker
             self.active_trade = True
-            self.entry_price = d[-1][best_ticker]["close"]
-            self.peak_price = self.entry_price
+            self.peak_price = d[-1][best_ticker]["close"]
+            self.current_atr = self.get_atr(df_best)
             
-            log(f"ENTRY: {best_ticker} | Regime: {regime} | Price: {self.entry_price}")
+            log(f"ENTRY: {best_ticker} | Regime: {regime}")
             return TargetAllocation({best_ticker: self.max_allocation})
 
         return None
