@@ -5,28 +5,27 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
+        # The master roster. You can plug in as many options here as you want.
         self.tickers = ["SOXL", "GDXU", "AGQ", "SPY", "VIXY"]
         
         # Engine Parameters
         self.vwap_len = 12
         self.spy_sma_len = 50
         self.rvol_threshold = 1.8
-        self.max_allocation = 1.00 
+        self.max_allocation = 1.00 # 100% All-In
         
         # Dynamic Risk Management
-        self.atr_multiplier = 1.5 # Tightened from 2.0 to 1.5 to compress drawdown
+        self.atr_multiplier = 1.5  
         self.active_trade = False
         self.active_ticker = None
         self.peak_price = None
         self.current_atr = None
 
     @property
-    def interval(self): 
-        return "5min"
+    def interval(self): return "5min"
 
     @property
-    def assets(self): 
-        return self.tickers
+    def assets(self): return self.tickers
 
     def get_atr(self, df, period=14):
         high_low = df['high'] - df['low']
@@ -75,7 +74,6 @@ class TradingStrategy(Strategy):
             minute = 0
             
         is_eod = (hour == 15 and minute >= 55)
-        # Re-introduced Midday Chop Filter
         is_midday_chop = (hour == 11 and minute >= 30) or (hour == 12) or (hour == 13)
 
         # --- 1. INTRADAY MANAGEMENT (ATR Trailing Stop & EOD) ---
@@ -113,13 +111,14 @@ class TradingStrategy(Strategy):
         if regime == "FLAT":
             return None
             
+        # Define the available "options" based on the current regime
         allowed_tickers = []
         if regime == "RISK_ON":
             allowed_tickers = ["SOXL"] 
         elif regime == "RISK_OFF":
             allowed_tickers = ["GDXU", "AGQ"] 
 
-        # --- 3. EXECUTION ---
+        # --- 3. EXECUTION: SELECT THE STRONGEST SINGLE OPTION ---
         scores = {}
         for t in allowed_tickers:
             hist = [bar[t] for bar in d if t in bar]
@@ -136,6 +135,7 @@ class TradingStrategy(Strategy):
                 scores[t] = rvol
         
         if scores:
+            # Pick the single highest scoring option
             best_ticker = max(scores, key=scores.get)
             hist = [bar[best_ticker] for bar in d if best_ticker in bar]
             df_best = pd.DataFrame(hist)
@@ -145,7 +145,7 @@ class TradingStrategy(Strategy):
             self.peak_price = d[-1][best_ticker]["close"]
             self.current_atr = self.get_atr(df_best)
             
-            log(f"ENTRY: {best_ticker} | Regime: {regime}")
+            log(f"ENTRY: {best_ticker} | Regime: {regime} | Score: {scores[best_ticker]:.2f}")
             return TargetAllocation({best_ticker: self.max_allocation})
 
         return None
