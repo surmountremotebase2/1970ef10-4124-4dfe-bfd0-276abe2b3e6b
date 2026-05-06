@@ -1,19 +1,18 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
-import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # The Omnidirectional Roster
-        self.tickers = ["TECL", "TECS", "SOXL", "SOXS", "UCO", "AGQ", "GDXU", "UVXY"]
+        # The Updated 6-Ticker Roster (Added FAS for Interest Rate Rotation)
+        self.tickers = ["TECL", "SOXL", "UCO", "AGQ", "GDXU", "FAS"]
         
         # Core Engine Parameters
         self.vwap_len = 12
         self.rvol_threshold = 1.8
         self.trailing_stop_pct = 0.08
         self.take_profit_pct = 0.10 
-        self.max_allocation = 1.0 # 100% Allocation for stress testing
+        self.max_allocation = 0.50 # 50% Live Allocation
         
         self.active_trade = False
         self.active_ticker = None
@@ -98,7 +97,7 @@ class TradingStrategy(Strategy):
             self.peak_price = d[-1][best_ticker]["close"]
             self.entry_price = d[-1][best_ticker]["close"]
             
-            log(f"OMNI ENTRY: {best_ticker} | RVOL: {scores[best_ticker]:.2f} | Entry: {self.entry_price}")
+            log(f"ROTATION ENTRY: {best_ticker} | RVOL: {scores[best_ticker]:.2f} | Entry: {self.entry_price}")
             return TargetAllocation({best_ticker: self.max_allocation})
 
         return None
