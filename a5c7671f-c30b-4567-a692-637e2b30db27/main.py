@@ -5,8 +5,8 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Final 2026 Macro Roster (UPRO removed)
-        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
+        # Final 2026 Macro Roster (UPRO removed, FAS added for Interest Rate Rotation)
+        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ", "FAS"]
         
         # Core Engine Parameters
         self.vwap_len = 12
