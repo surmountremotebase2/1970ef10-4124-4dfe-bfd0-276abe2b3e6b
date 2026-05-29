@@ -5,16 +5,16 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Final 2026 Macro Roster
+        # Final 2026 Macro Roster (UPRO removed)
         self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
-        
+       
         # Core Engine Parameters
         self.vwap_len = 12
         self.rvol_threshold = 1.8
-        self.trailing_stop_pct = 0.08 # 8% Trailing Stop
-        self.take_profit_pct = 0.05 # <-- Adjusted to 5% Target
-        self.max_allocation = 1.0 # 100% Allocation for Post-PDT
-        
+        self.trailing_stop_pct = 0.08
+        self.take_profit_pct = 0.10
+        self.max_allocation = 1.00 # Updated to 100% full allocation model for June 4th
+       
         self.active_trade = False
         self.active_ticker = None
         self.peak_price = None
@@ -27,23 +27,23 @@ class TradingStrategy(Strategy):
     def assets(self): return self.tickers
 
     def get_conviction_score(self, history):
-        # Memory buffer check for platform stability
+        # Lowered to 78 bars to ensure we don't exceed the platform's memory buffer
         if len(history) < 78: return 0
         df = pd.DataFrame(history)
-        
+       
         # VWAP calculation (12-period)
-        recent_df = df.tail(self.vwap_len)
+        recent_df = df.tail(12)
         vwap = (recent_df['close'] * recent_df['volume']).sum() / recent_df['volume'].sum()
         current_price = df['close'].iloc[-1]
-        
+       
         # RVOL calculation (Current volume vs 20-period average)
         avg_vol = df['volume'].tail(20).mean()
         rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
-        
-        # Macro Trend Check
+       
+        # Macro Trend Check (Calculates the mean over the max available rolling buffer)
         sma_macro = df['close'].mean()
-        
-        # Trigger Conditions: Above VWAP, Above SMA, and High Volume
+       
+        # Asset must be above VWAP and the rolling SMA to filter out dead-cat bounces
         if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold:
             return rvol
         return 0
@@ -51,56 +51,57 @@ class TradingStrategy(Strategy):
     def run(self, data):
         d = data.get("ohlcv")
         if not d: return None
-        
-        # --- 1. EXIT MANAGEMENT (5% Target & 8% Stop) ---
+       
+        # --- 1. SWING MANAGEMENT (10% Take-Profit & 8% Trailing Stop) ---
         if self.active_trade:
             current_bar = d[-1].get(self.active_ticker)
             if not current_bar: return None
-            
+           
             cp = current_bar["close"]
-            
-            # Update peak price for the trailing stop
+           
+            # Continuously update the peak price to drag the stop-loss upward
             if self.peak_price is None or cp > self.peak_price:
                 self.peak_price = cp
-            
-            # OFFENSIVE EXIT: Lock in 5% gain
+           
+            # OFFENSIVE EXIT: Lock in 10% hard gain
             if self.entry_price and cp >= self.entry_price * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {self.active_ticker} exit at {cp}. Secured 5% gain.")
-                self._reset_engine()
+                log(f"TAKE PROFIT: {self.active_ticker} exit at {cp}. Secured 10% gain.")
+                self.active_trade = False
+                self.active_ticker = None
+                self.peak_price = None
+                self.entry_price = None
                 return TargetAllocation({})
 
             # DEFENSIVE EXIT: 8% Trailing Stop
             if cp <= self.peak_price * (1 - self.trailing_stop_pct):
-                log(f"STOP LOSS: {self.active_ticker} exit at {cp}. Peak was {self.peak_price}.")
-                self._reset_engine()
+                log(f"SWING STOP: {self.active_ticker} exit at {cp}. Peak was {self.peak_price}.")
+                self.active_trade = False
+                self.active_ticker = None
+                self.peak_price = None
+                self.entry_price = None
                 return TargetAllocation({})
-            
+           
+            # Hold position overnight
             return None
 
-        # --- 2. PREDATORY SELECTION (100% Entry) ---
+        # --- 2. PREDATORY SELECTION (New Entries) ---
         scores = {}
         for t in self.tickers:
             hist = [bar[t] for bar in d if t in bar]
             score = self.get_conviction_score(hist)
             if score > 0:
                 scores[t] = score
-        
+       
         if scores:
+            # Deploy capital into the single asset with the highest volume conviction
             best_ticker = max(scores, key=scores.get)
-            
+           
             self.active_ticker = best_ticker
             self.active_trade = True
             self.peak_price = d[-1][best_ticker]["close"]
             self.entry_price = d[-1][best_ticker]["close"]
-            
-            log(f"ENTRY: {best_ticker} | RVOL: {scores[best_ticker]:.2f} | Target: {self.entry_price * 1.05:.2f}")
+           
+            log(f"SWING ENTRY: {best_ticker} | RVOL: {scores[best_ticker]:.2f} | Entry: {self.entry_price}")
             return TargetAllocation({best_ticker: self.max_allocation})
 
         return None
-
-    def _reset_engine(self):
-        """Reset all tracking variables after an exit."""
-        self.active_trade = False
-        self.active_ticker = None
-        self.peak_price = None
-        self.entry_price = None
