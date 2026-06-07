@@ -15,11 +15,12 @@ class TradingStrategy(Strategy):
         self.take_profit_pct = 0.10
         self.max_allocation = 1.00 
        
-        # Internal Memory Tracker
+        # Internal Memory Trackers
         self.active_trade = False
         self.active_ticker = None
         self.peak_price = None
         self.entry_price = None
+        self.exited_ticker = None # Circuit breaker to handle backtester settlement lag
 
     @property
     def interval(self): return "5min"
@@ -48,55 +49,50 @@ class TradingStrategy(Strategy):
         d = data.get("ohlcv")
         if not d: return None
         
-        # --- THE HYBRID STATE TRACKER ---
-        # 1. Default to internal memory (Required for Backtesting)
-        current_ticker = self.active_ticker
-        is_active = self.active_trade
-        
-        # 2. Live Broker Override (Required for Production Amnesia Recovery)
         holdings = data.get("holdings", {})
-        if holdings:
-            found_live_asset = False
+        
+        # --- AMNESIA RECOVERY CIRCUIT BREAKER ---
+        # If internal state says we are in cash, check if the live broker feed disagrees.
+        if not self.active_trade and holdings:
             for t in self.tickers:
-                if holdings.get(t, 0) > 0: 
-                    current_ticker = t
-                    is_active = True
-                    found_live_asset = True
-                    break
-            
-            # If the live feed confirms we hold no roster assets, force cash state
-            if not found_live_asset:
-                is_active = False
-                current_ticker = None
+                if holdings.get(t, 0) > 0:
+                    # If this matches the ticker we JUST exited, ignore it (it's backtest lag)
+                    if t != self.exited_ticker:
+                        self.active_trade = True
+                        self.active_ticker = t
+                        log(f"AMNESIA RECOVERY: Resynced live position for {t}")
+                        break
 
         # --- 1. SWING MANAGEMENT (10% Take-Profit & 8% Trailing Stop) ---
-        if is_active and current_ticker:
-            current_bar = d[-1].get(current_ticker)
+        if self.active_trade and self.active_ticker:
+            current_bar = d[-1].get(self.active_ticker)
             if not current_bar: return None
            
             cp = current_bar["close"]
            
-            # AMNESIA RECOVERY: Restore tracking logic if server restarted
+            # Baseline tracking initialization during an amnesia recovery
             if self.peak_price is None or self.entry_price is None:
                 self.peak_price = cp
                 self.entry_price = cp
-                log(f"RECOVERY OVERRIDE: Restored tracking for {current_ticker} at {cp}")
+                log(f"RECOVERY INITIALIZATION: Set tracking baseline for {self.active_ticker} at {cp}")
            
             if cp > self.peak_price:
                 self.peak_price = cp
            
-            # OFFENSIVE EXIT: 10% target
+            # OFFENSIVE EXIT: 10% Target
             if cp >= self.entry_price * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {current_ticker} exit at {cp}.")
+                log(f"TAKE PROFIT: {self.active_ticker} exit at {cp}.")
+                self.exited_ticker = self.active_ticker # Set circuit breaker
                 self.active_trade = False
                 self.active_ticker = None
                 self.peak_price = None
                 self.entry_price = None
                 return TargetAllocation({})
 
-            # DEFENSIVE EXIT: 8% stop
+            # DEFENSIVE EXIT: 8% Trailing Stop
             if cp <= self.peak_price * (1 - self.trailing_stop_pct):
-                log(f"SWING STOP: {current_ticker} exit at {cp}.")
+                log(f"SWING STOP: {self.active_ticker} exit at {cp}.")
+                self.exited_ticker = self.active_ticker # Set circuit breaker
                 self.active_trade = False
                 self.active_ticker = None
                 self.peak_price = None
@@ -116,6 +112,9 @@ class TradingStrategy(Strategy):
        
         if scores:
             best_ticker = max(scores, key=scores.get)
+            
+            # Clear the circuit breaker since we are opening a fresh, legitimate trade
+            self.exited_ticker = None
             
             self.active_ticker = best_ticker
             self.active_trade = True
