@@ -19,7 +19,7 @@ class TradingStrategy(Strategy):
         # Internal Memory Tracker
         # Format: {"TICKER": {"entry_price": X, "peak_price": Y}}
         self.active_positions = {}
-        self.exited_tickers = [] # Circuit breaker to handle backtester settlement lag
+        self.exited_tickers = [] 
 
     @property
     def interval(self): return "5min"
@@ -115,7 +115,6 @@ class TradingStrategy(Strategy):
             if is_safe_trading_window:
                 scores = {}
                 for t in self.tickers:
-                    # Sieve: Prevent buying a ticker we already hold
                     if t in self.active_positions:
                         continue
                     
@@ -134,37 +133,11 @@ class TradingStrategy(Strategy):
                     }
                     state_changed = True
                     
-                    log(f"SWING ENTRY: {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
+                    log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
 
-        # --- 3. ALLOCATION EXECUTION (Backtest-Safe Dynamic Freeze) ---
-        if state_changed or len(self.active_positions) > 0:
-            new_allocation = {}
-            
-            # 1. Calculate total portfolio value safely
-            total_portfolio_value = holdings.get("CASH", 0)
-            for t in self.tickers:
-                shares = holdings.get(t, 0)
-                if shares > 0 and t in d[-1]:
-                    total_portfolio_value += shares * d[-1][t]["close"]
-            
-            # 2. Prevent zero-division on the first backtest bar
-            if total_portfolio_value <= 0:
-                for t in self.active_positions:
-                    new_allocation[t] = self.allocation_size
-                return TargetAllocation(new_allocation)
-
-            # 3. Freeze existing positions and size new entries
-            for t in self.active_positions:
-                shares = holdings.get(t, 0)
-                if shares > 0 and t in d[-1]:
-                    # Asset is already held: lock its target to its exact current percentage
-                    drifted_weight = (shares * d[-1][t]["close"]) / total_portfolio_value
-                    new_allocation[t] = drifted_weight
-                else:
-                    # Brand new entry: deploy available cash, capped at 50%
-                    cash_ratio = holdings.get("CASH", 0) / total_portfolio_value
-                    new_allocation[t] = min(self.allocation_size, cash_ratio)
-            
+        # --- 3. ALLOCATION EXECUTION (True Set-and-Forget) ---
+        if state_changed:
+            new_allocation = {t: self.allocation_size for t in self.active_positions}
             return TargetAllocation(new_allocation)
             
         return None
