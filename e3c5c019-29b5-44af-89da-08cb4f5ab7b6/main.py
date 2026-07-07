@@ -5,8 +5,8 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # 5-Ticker Macro Roster with SHNY replacing GDXU
-        self.tickers = ["TECL", "SHNY", "SOXL", "UCO", "AGQ"]
+        # 4-Ticker Macro Roster (Gold entirely removed)
+        self.tickers = ["TECL", "SOXL", "UCO", "AGQ"]
         
         # Engine Parameters
         self.allocation_size = 0.50 
