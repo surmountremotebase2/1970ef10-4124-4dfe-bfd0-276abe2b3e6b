@@ -3,7 +3,6 @@ import pandas as pd
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Internal state to track active breakout positions
         self.active_positions = []
 
     @property
@@ -22,7 +21,7 @@ class TradingStrategy(Strategy):
         active_assets = [a for a in self.assets if a != "SHV"]
         ohlcv = data.get("ohlcv", [])
         
-        if len(ohlcv) < 25: 
+        if len(ohlcv) < 55: 
             return TargetAllocation({"SHV": 1.0})
 
         close_prices = {}
@@ -48,34 +47,30 @@ class TradingStrategy(Strategy):
 
         current_holdings = list(self.active_positions)
 
-        # 1. Pure Price Action Breakout (Donchian Logic)
         for asset in active_assets:
-            if asset in close_prices and len(close_prices[asset]) >= 21:
+            if asset in close_prices and len(close_prices[asset]) >= 50:
                 current_price = close_prices[asset].iloc[-1]
                 
-                # Highest high of the previous 20 days (excluding today)
+                sma_50 = close_prices[asset].rolling(window=50).mean().iloc[-1]
                 high_20 = high_prices[asset].iloc[-21:-1].max()
-                # Lowest low of the previous 10 days (excluding today)
-                low_10 = low_prices[asset].iloc[-11:-1].min()
+                low_5 = low_prices[asset].iloc[-6:-1].min()
                 
-                # ENTRY: Price breaches the 20-day high
-                if current_price > high_20 and asset not in current_holdings:
+                # ENTRY: Macro trend confirmed UP and price breaks 20-day high
+                if current_price > sma_50 and current_price > high_20 and asset not in current_holdings:
                     current_holdings.append(asset)
                     
-                # EXIT: Price collapses below the 10-day low
-                elif current_price < low_10 and asset in current_holdings:
+                # EXIT: Price collapses below 5-day low OR breaks macro trend support
+                elif (current_price < low_5 or current_price < sma_50) and asset in current_holdings:
                     current_holdings.remove(asset)
 
-        # 2. Sync Internal State
         current_holdings.sort()
         
-        # Kill Switch: Bypass rebalance if holdings haven't changed
+        # Kill Switch to prevent platform friction
         if self.active_positions == current_holdings:
             return None
             
         self.active_positions = current_holdings
         
-        # 3. Capital Allocation
         allocation = {a: 0.0 for a in self.assets}
         
         if not current_holdings:
