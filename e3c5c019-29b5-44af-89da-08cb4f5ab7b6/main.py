@@ -1,122 +1,110 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
+import numpy as np
 
 class TradingStrategy(Strategy):
-    def __init__(self):
-        # Original 5-Ticker Macro Roster
-        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
-        
-        # Dual-Bullet Parameters
-        self.allocation_size = 0.50 
-        self.max_positions = 2      
-        self.vwap_len = 12
-        self.rvol_threshold = 1.8
-        self.trailing_stop_pct = 0.08
-        self.take_profit_pct = 0.10
-        
-        # Internal Memory Tracker
-        self.active_positions = {}
-        self.exited_tickers = [] 
+    @property
+    def interval(self):
+        # 1-hour interval isolates the 9:30 AM - 10:30 AM opening bar 
+        # to calculate the volume Z-score gap defense.
+        return "1hour"
 
     @property
-    def interval(self): return "5min"
+    def assets(self):
+        # The clean macro-vector core target list and cash vehicle.
+        return ["SOXL", "TECL", "AGQ", "UCO", "GDXU", "SHV"] 
 
     @property
-    def assets(self): return self.tickers
-
-    def get_conviction_score(self, history):
-        if len(history) < 200: return 0
-        df = pd.DataFrame(history)
-        
-        recent_df = df.tail(self.vwap_len)
-        vwap = (recent_df['close'] * recent_df['volume']).sum() / recent_df['volume'].sum()
-        current_price = df['close'].iloc[-1]
-        
-        avg_vol = df['volume'].tail(20).mean()
-        rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
-        
-        sma_macro = df['close'].tail(200).mean()
-        
-        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold:
-            return rvol
-        return 0
+    def data(self):
+        return []
 
     def run(self, data):
-        d = data.get("ohlcv")
-        if not d: return None
+        # 1. Initialize Baseline - Default to Cash Equivalent (SHV)
+        assets = [a for a in self.assets if a != "SHV"]
+        allocation = {a: 0.0 for a in self.assets}
         
-        # --- THE DATA SCRUBBER ---
-        # Force all platform holdings data to UPPERCASE to prevent API amnesia
-        raw_holdings = data.get("holdings", {})
-        holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
+        ohlcv = data.get("ohlcv", [])
+        if len(ohlcv) < 140: # Require historical 1-hour bars for rolling windows 
+            allocation["SHV"] = 1.0
+            return TargetAllocation(allocation)
+
+        # 2. Reconstruct Dataframes from Surmount Data Arrays
+        close_prices = {}
+        volumes = {}
+        for asset in assets:
+            closes = []
+            vols = []
+            for row in ohlcv:
+                if asset in row:
+                    closes.append(row[asset].get('close', 0))
+                    vols.append(row[asset].get('volume', 0))
+            if closes:
+                close_prices[asset] = pd.Series(closes)
+                volumes[asset] = pd.Series(vols)
         
-        # --- AMNESIA RECOVERY CIRCUIT BREAKER ---
-        if holdings:
-            for t in self.tickers:
-                if holdings.get(t, 0) > 0 and t not in self.active_positions:
-                    if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
-                        cp = d[-1][t]["close"] if t in d[-1] else 0
-                        self.active_positions[t] = {"entry_price": cp, "peak_price": cp}
-                        log(f"AMNESIA RECOVERY: Resynced live position for {t}")
+        if not close_prices:
+            allocation["SHV"] = 1.0
+            return TargetAllocation(allocation)
 
-        self.exited_tickers = []
-        state_changed = False
+        prices_df = pd.DataFrame(close_prices)
+        returns_df = prices_df.pct_change().dropna()
 
-        # --- 1. SWING MANAGEMENT ---
-        for t, metrics in list(self.active_positions.items()):
-            current_bar = d[-1].get(t)
-            if not current_bar: continue
+        if len(returns_df) < 70:
+            allocation["SHV"] = 1.0
+            return TargetAllocation(allocation)
+
+        # 3. Calculate the Convexity Premium (Cp)
+        # 10 trading days * ~7 hours/day = 70 periods
+        rolling_mean = returns_df.rolling(window=70).mean()
+        rolling_var = returns_df.rolling(window=70).var()
+        
+        current_cp = (rolling_mean.iloc[-1] / (rolling_var.iloc[-1] + 1e-8))
+        
+        # 4. Asymmetric Opening Filter (Volume Z-Score)
+        valid_assets = []
+        for asset in assets:
+            # Only evaluate if directional compounding outpaces variance decay
+            if current_cp[asset] > 1.2:
+                vol_series = volumes[asset]
+                if len(vol_series) > 140:
+                    current_vol = vol_series.iloc[-1]
+                    vol_mean_20d = vol_series.iloc[-140:].mean()
+                    vol_std_20d = vol_series.iloc[-140:].std()
+                    
+                    z_score = (current_vol - vol_mean_20d) / (vol_std_20d + 1e-8)
+                    
+                    # Require institutional volume consensus (Z > 1.5) to unlock trade execution
+                    if z_score > 1.5:
+                        valid_assets.append(asset)
+        
+        # 5. Inverse Covariance Risk Parity Layer
+        if not valid_assets:
+            # Capital is automatically sidelined to cash if conditions are unmet
+            allocation["SHV"] = 1.0
+            return TargetAllocation(allocation)
+
+        # Calculate 20-day (140 period) covariance matrix for valid assets
+        cov_matrix = returns_df[valid_assets].tail(140).cov()
+        
+        # Calculate inverse volatility weights
+        inv_vol = 1.0 / np.sqrt(np.diag(cov_matrix) + 1e-8)
+        risk_parity_weights = inv_vol / np.sum(inv_vol)
+        
+        # 6. Self-Preservation Logic (Dynamic Volatility Halt)
+        # Calculates real-time annualized volatility of the aggregate active portfolio
+        port_variance = np.dot(risk_parity_weights.T, np.dot(cov_matrix, risk_parity_weights))
+        port_vol_annualized = np.sqrt(port_variance) * np.sqrt(252 * 7) 
+        
+        if port_vol_annualized > 0.25:
+            # Enforce an automatic 50% risk exposure reduction if macro volatility spikes
+            risk_parity_weights *= 0.5
+
+        # 7. Final Allocation Mapping
+        for idx, asset in enumerate(valid_assets):
+            allocation[asset] = round(float(risk_parity_weights[idx]), 4)
             
-            cp = current_bar["close"]
-            
-            if cp > metrics["peak_price"]:
-                self.active_positions[t]["peak_price"] = cp
-            
-            # OFFENSIVE EXIT: 10% Target
-            if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {t} exit at {cp}.")
-                self.exited_tickers.append(t)
-                del self.active_positions[t]
-                state_changed = True
-                continue
+        # Remainder of total capital defaults cleanly to SHV
+        allocation["SHV"] = round(1.0 - sum([allocation[a] for a in valid_assets]), 4)
 
-            # DEFENSIVE EXIT: 8% Trailing Stop
-            if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
-                log(f"SWING STOP: {t} exit at {cp}.")
-                self.exited_tickers.append(t)
-                del self.active_positions[t]
-                state_changed = True
-                continue
-
-        # --- 2. PREDATORY SELECTION ---
-        if len(self.active_positions) < self.max_positions:
-            scores = {}
-            for t in self.tickers:
-                # The Sieve: Prevent buying a ticker we already hold
-                if t in self.active_positions:
-                    continue
-                
-                hist = [bar[t] for bar in d if t in bar]
-                if len(hist) > 0:
-                    score = self.get_conviction_score(hist)
-                    if score > 0:
-                        scores[t] = score
-            
-            if scores:
-                best_ticker = max(scores, key=scores.get)
-                
-                self.active_positions[best_ticker] = {
-                    "entry_price": d[-1][best_ticker]["close"],
-                    "peak_price": d[-1][best_ticker]["close"]
-                }
-                state_changed = True
-                log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
-
-        # --- 3. ALLOCATION EXECUTION ---
-        # Simply hand the clean allocation targets to Surmount's backend
-        if state_changed:
-            new_allocation = {t: self.allocation_size for t in self.active_positions}
-            return TargetAllocation(new_allocation)
-
-        return None
+        return TargetAllocation(allocation)
