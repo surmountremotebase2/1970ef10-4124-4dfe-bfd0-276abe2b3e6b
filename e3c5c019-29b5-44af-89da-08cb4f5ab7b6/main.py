@@ -5,7 +5,6 @@ import numpy as np
 class TradingStrategy(Strategy):
     @property
     def interval(self):
-        # Daily interval remains to capture the macro swing.
         return "1day"
 
     @property
@@ -18,8 +17,19 @@ class TradingStrategy(Strategy):
 
     def run(self, data):
         assets = [a for a in self.assets if a != "SHV"]
+        
+        # 1. Initialize all allocations to 0.0 (Forces a hard exit if asset fails SMA test)
         allocation = {a: 0.0 for a in self.assets}
         
+        # 2. Fetch current weights to calculate the deadband
+        current_holdings = data.get("holdings", {})
+        total_account_value = data.get("account_value", 0.0)
+        current_weights = {a: 0.0 for a in self.assets}
+        
+        if total_account_value > 0:
+            for a in self.assets:
+                current_weights[a] = current_holdings.get(a, 0.0) / total_account_value
+
         ohlcv = data.get("ohlcv", [])
         if len(ohlcv) < 55: 
             allocation["SHV"] = 1.0
@@ -42,7 +52,7 @@ class TradingStrategy(Strategy):
         valid_assets = []
         inv_vol_scores = {}
 
-        # 1. Asymmetric Entry / Exit Logic
+        # 3. Asymmetric Entry / Exit Logic
         for asset in assets:
             if asset in prices_df.columns and len(prices_df[asset]) >= 50:
                 asset_data = prices_df[asset]
@@ -52,29 +62,42 @@ class TradingStrategy(Strategy):
                 sma_20 = asset_data.rolling(window=20).mean().iloc[-1]
                 sma_50 = asset_data.rolling(window=50).mean().iloc[-1]
                 
-                # SLOW ENTRY: 20-day must be above 50-day (Macro trend confirmed)
-                # FAST EXIT: Price must remain above 10-day (Short-term momentum intact)
+                # SLOW ENTRY: 20-day > 50-day 
+                # FAST EXIT: Price > 10-day 
                 if sma_20 > sma_50 and current_price > sma_10:
                     valid_assets.append(asset)
                     
-                    # Risk Calculation for Position Sizing (14-day Volatility)
+                    # 14-day Volatility Calculation
                     returns = asset_data.pct_change().dropna().tail(14)
                     volatility = returns.std() + 1e-8
                     inv_vol_scores[asset] = 1.0 / volatility
                     
-        # 2. Risk Parity Allocation
+        # 4. Risk Parity Allocation with 5% Deadband
         if not valid_assets:
             allocation["SHV"] = 1.0
             return TargetAllocation(allocation)
             
         total_inv_vol = sum(inv_vol_scores.values())
+        proposed_weights = {}
         
         for asset in valid_assets:
             raw_weight = inv_vol_scores[asset] / total_inv_vol
-            # Hard cap single-asset exposure at 25% to prevent outsized drawdown
-            allocation[asset] = min(round(float(raw_weight), 4), 0.25)
+            proposed_weights[asset] = min(round(float(raw_weight), 4), 0.25)
             
-        # Remainder sweeps to Cash/SHV
+        deadband_threshold = 0.05
+        
+        for asset in valid_assets:
+            current = current_weights.get(asset, 0.0)
+            proposed = proposed_weights.get(asset, 0.0)
+            
+            # If the weight drift is strictly greater than 5%, rebalance.
+            # Otherwise, freeze the current weight to kill the daily churn.
+            if abs(proposed - current) > deadband_threshold:
+                allocation[asset] = proposed
+            else:
+                allocation[asset] = current
+            
+        # 5. Remainder dynamically sweeps to Cash/SHV
         allocation["SHV"] = round(1.0 - sum([allocation[a] for a in valid_assets]), 4)
 
         return TargetAllocation(allocation)
