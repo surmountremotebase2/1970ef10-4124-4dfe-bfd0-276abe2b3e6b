@@ -47,7 +47,7 @@ class TradingStrategy(Strategy):
         if not d: return None
        
         # --- PHASE 1: THE DATA SCRUBBER ---
-        # Force all platform holdings data to UPPERCASE to prevent API amnesia
+        # Guarantees API data is uppercase, permanently killing the duplicate buy glitch
         raw_holdings = data.get("holdings", {})
         holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
        
@@ -113,32 +113,9 @@ class TradingStrategy(Strategy):
                 state_changed = True
                 log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
 
-        # --- PHASE 5: BULLETPROOF DYNAMIC MAPPING ---
+        # --- PHASE 5: NATIVE ALLOCATION ---
         if state_changed:
-            cash = holdings.get("CASH", 0)
-            current_values = {}
-            total_portfolio_value = cash
-           
-            for t in self.tickers:
-                shares = holdings.get(t, 0)
-                if shares > 0 and t in d[-1]:
-                    asset_value = shares * d[-1][t]["close"]
-                    current_values[t] = asset_value
-                    total_portfolio_value += asset_value
-           
-            if total_portfolio_value <= 0:
-                return None
-           
-            new_allocation = {}
-            for t in self.active_positions:
-                # Lock existing positions to their exact current weight to block rebalancing
-                if holdings.get(t, 0) > 0 and t in current_values:
-                    new_allocation[t] = current_values[t] / total_portfolio_value
-                else:
-                    # Target 50% for brand new entries based strictly on total portfolio value
-                    target_value = min(cash, total_portfolio_value * self.allocation_size)
-                    new_allocation[t] = target_value / total_portfolio_value
-                   
+            new_allocation = {t: self.allocation_size for t in self.active_positions}
             return TargetAllocation(new_allocation)
 
         return None
