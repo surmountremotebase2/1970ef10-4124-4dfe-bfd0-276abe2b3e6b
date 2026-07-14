@@ -93,8 +93,8 @@ class TradingStrategy(Strategy):
         if len(self.active_positions) < self.max_positions:
             scores = {}
             for t in self.tickers:
-                # The Sieve: Prevent buying if we hold live shares or have active memory tracker records
-                if t in self.active_positions or holdings.get(t, 0) > 0:
+                # The Sieve: Prevent buying ONLY if the internal tracker shows we actively hold it
+                if t in self.active_positions:
                     continue
                
                 hist = [bar[t] for bar in d if t in bar]
