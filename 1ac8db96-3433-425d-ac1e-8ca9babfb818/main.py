@@ -4,8 +4,8 @@ import pandas as pd
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Tradable Macro Roster (TECL removed)
-        self.tickers = ["GDXU", "SOXL", "UCO", "AGQ"]
+        # Tradable Macro Roster (SOXL removed, TECL restored)
+        self.tickers = ["TECL", "GDXU", "UCO", "AGQ"]
         
         # Broad Market Proxy (Monitored only, never traded)
         self.macro_proxy = "QQQ"
