@@ -50,14 +50,14 @@ class TradingStrategy(Strategy):
         if not d: return None
        
         # --- PHASE 1: THE DATA SCRUBBER ---
-        # Guarantees API data is uppercase, permanently killing the duplicate buy glitch
         raw_holdings = data.get("holdings", {})
         holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
        
-        # --- PHASE 2: AMNESIA RECOVERY CIRCUIT BREAKER ---
-        if holdings:
+        # --- PHASE 2: AMNESIA RECOVERY CIRCUIT BREAKER (LIVE PRODUCTION ONLY) ---
+        # Only runs in live production environments where real account parameters exist.
+        # Bypassed in sandbox to prevent simulated execution lag from forcing loops.
+        if "CASH" in holdings:
             for t in self.tickers:
-                # Bypasses fractional share dust by checking for structural positions (> 0.01 shares)
                 if holdings.get(t, 0) > 0.01 and t not in self.active_positions:
                     if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
                         cp = d[-1][t]["close"] if t in d[-1] else 0
@@ -81,7 +81,7 @@ class TradingStrategy(Strategy):
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
-                self.cooldown_positions[t] = len(d) # Log current dataset length for cooldown tracking
+                self.cooldown_positions[t] = len(d) 
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -90,7 +90,7 @@ class TradingStrategy(Strategy):
             if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
                 log(f"SWING STOP: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
-                self.cooldown_positions[t] = len(d) # Log current dataset length for cooldown tracking
+                self.cooldown_positions[t] = len(d) 
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -99,11 +99,11 @@ class TradingStrategy(Strategy):
         if len(self.active_positions) < self.max_positions:
             scores = {}
             for t in self.tickers:
-                # Whipsaw Shield: 78 bars of 5-min intervals equals 1 full trading day of quarantine
+                # Whipsaw Shield: 78 bars (1 full trading day) block after exiting
                 if t in self.cooldown_positions and (len(d) - self.cooldown_positions[t]) < 78:
                     continue
                 
-                # The Sieve: Prevent buying if tracked in memory OR if physical inventory exists
+                # The Sieve: Blocks re-entry if internal tracking or physical positions exist
                 if t in self.active_positions or holdings.get(t, 0) > 0.01:
                     continue
                
@@ -125,7 +125,6 @@ class TradingStrategy(Strategy):
 
         # --- PHASE 5: ENVIRONMENT-ADAPTIVE ALLOCATION ---
         if state_changed:
-            # LIVE ENGINE SWITCH: Executes if the real account 'CASH' key is present
             if "CASH" in holdings:
                 cash = holdings.get("CASH", 0)
                 current_values = {}
@@ -141,16 +140,16 @@ class TradingStrategy(Strategy):
                 if total_portfolio_value > 0:
                     new_allocation = {}
                     for t in self.active_positions:
-                        # Lock existing positions to their exact current decimal weight to stop rebalancing
+                        # Freeze existing positions to their specific asset weights to stop rebalancing trims
                         if holdings.get(t, 0) > 0.01 and t in current_values:
                             new_allocation[t] = current_values[t] / total_portfolio_value
                         else:
-                            # Target a clean 50% slice of total account value for brand new entries
+                            # Allocate a clean 50% target slice for brand new entries
                             target_value = min(cash, total_portfolio_value * self.allocation_size)
                             new_allocation[t] = target_value / total_portfolio_value
                     return TargetAllocation(new_allocation)
             
-            # SANDBOX FALLBACK: Standard split for the simulator when the 'CASH' key is absent
+            # Sandbox Fallback for clean simulation testing
             new_allocation = {t: self.allocation_size for t in self.active_positions}
             return TargetAllocation(new_allocation)
 
