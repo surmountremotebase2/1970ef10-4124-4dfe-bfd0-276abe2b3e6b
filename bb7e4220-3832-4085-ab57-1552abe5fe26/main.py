@@ -21,6 +21,9 @@ class TradingStrategy(Strategy):
         
         # Geopolitical Cooldown Registry
         self.cooldown_positions = {}
+        
+        # Independent Internal Clock
+        self.bar_count = 0
 
     @property
     def interval(self): return "5min"
@@ -46,6 +49,7 @@ class TradingStrategy(Strategy):
         return 0
 
     def run(self, data):
+        self.bar_count += 1
         d = data.get("ohlcv")
         if not d: return None
        
@@ -53,13 +57,17 @@ class TradingStrategy(Strategy):
         raw_holdings = data.get("holdings", {})
         holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
        
-        # --- PHASE 2: AMNESIA RECOVERY CIRCUIT BREAKER (LIVE PRODUCTION ONLY) ---
-        # Only runs in live production environments where real account parameters exist.
-        # Bypassed in sandbox to prevent simulated execution lag from forcing loops.
-        if "CASH" in holdings:
+        # --- PHASE 2: AMNESIA RECOVERY & LAG SHIELD ---
+        if holdings:
             for t in self.tickers:
                 if holdings.get(t, 0) > 0.01 and t not in self.active_positions:
-                    if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
+                    
+                    # LAG SHIELD: If we intentionally sold this asset within the last 5 bars (25 mins), 
+                    # ignore the leftover shares. This permanently kills the simulator loop.
+                    if t in self.cooldown_positions and (self.bar_count - self.cooldown_positions[t]) < 5:
+                        continue
+                        
+                    if len(self.active_positions) < self.max_positions:
                         cp = d[-1][t]["close"] if t in d[-1] else 0
                         self.active_positions[t] = {"entry_price": cp, "peak_price": cp}
                         log(f"AMNESIA RECOVERY: Resynced live position for {t}")
@@ -81,7 +89,7 @@ class TradingStrategy(Strategy):
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
-                self.cooldown_positions[t] = len(d) 
+                self.cooldown_positions[t] = self.bar_count 
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -90,7 +98,7 @@ class TradingStrategy(Strategy):
             if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
                 log(f"SWING STOP: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
-                self.cooldown_positions[t] = len(d) 
+                self.cooldown_positions[t] = self.bar_count 
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -100,7 +108,7 @@ class TradingStrategy(Strategy):
             scores = {}
             for t in self.tickers:
                 # Whipsaw Shield: 78 bars (1 full trading day) block after exiting
-                if t in self.cooldown_positions and (len(d) - self.cooldown_positions[t]) < 78:
+                if t in self.cooldown_positions and (self.bar_count - self.cooldown_positions[t]) < 78:
                     continue
                 
                 # The Sieve: Blocks re-entry if internal tracking or physical positions exist
