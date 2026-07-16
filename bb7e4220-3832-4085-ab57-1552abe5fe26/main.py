@@ -17,10 +17,6 @@ class TradingStrategy(Strategy):
         
         # Internal State Tracker
         self.active_positions = {}
-        
-        # Cooldown Registry & Internal Clock
-        self.cooldown_positions = {}
-        self.bar_count = 0
 
     @property
     def interval(self): return "5min"
@@ -40,14 +36,23 @@ class TradingStrategy(Strategy):
         rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
         
         sma_macro = df['close'].tail(200).mean()
+
+        # --- THE MACD TREND FILTER ---
+        # Calculates the MACD line and the Signal line natively to gauge actual momentum
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
         
-        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold:
+        # True if the MACD line has crossed above the Signal line (bullish posture)
+        macd_bullish = macd_line.iloc[-1] > signal_line.iloc[-1]
+        
+        # The engine now requires the MACD to be bullish to confirm the volume spike is real
+        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold and macd_bullish:
             return rvol
         return 0
 
     def run(self, data):
-        # Advance the independent internal clock by 1 every 5 minutes
-        self.bar_count += 1
         d = data.get("ohlcv")
         if not d: return None
         
@@ -70,7 +75,6 @@ class TradingStrategy(Strategy):
             # Take Profit Exit
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
-                self.cooldown_positions[t] = self.bar_count
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -78,7 +82,6 @@ class TradingStrategy(Strategy):
             # Trailing Stop Exit
             if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
                 log(f"SWING STOP: {t} exit at {cp}.")
-                self.cooldown_positions[t] = self.bar_count
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -87,10 +90,6 @@ class TradingStrategy(Strategy):
         if len(self.active_positions) < self.max_positions:
             scores = {}
             for t in self.tickers:
-                # COOLDOWN SHIELD: Block re-entry for 78 bars (Exactly 6.5 hours of active market data)
-                if t in self.cooldown_positions and (self.bar_count - self.cooldown_positions[t]) < 78:
-                    continue
-                
                 # DUPLICATE SHIELD: Block if active in memory OR physical holdings > 0.01
                 if t in self.active_positions or holdings.get(t, 0) > 0.01:
                     continue
@@ -131,3 +130,5 @@ class TradingStrategy(Strategy):
                     alloc[t] = self.allocation_size
                     
             return TargetAllocation(alloc)
+
+        return None
