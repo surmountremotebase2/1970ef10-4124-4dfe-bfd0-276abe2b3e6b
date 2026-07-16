@@ -4,27 +4,29 @@ import pandas as pd
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Tradable Macro Roster (SOXL removed, TECL restored)
-        self.tickers = ["TECL", "GDXU", "UCO", "AGQ"]
+        # Explicitly segregated sleeves
+        self.tech_tickers = ["TECL", "SOXL"]
+        self.commodity_tickers = ["GDXU", "UCO", "AGQ"]
         
-        # Broad Market Proxy (Monitored only, never traded)
+        # Combined roster for data retrieval
+        self.tickers = self.tech_tickers + self.commodity_tickers
         self.macro_proxy = "QQQ"
         
-        # Core Bullet Parameters
+        # Risk & Core Parameters (Per Sleeve)
         self.allocation_size = 0.50
-        self.max_positions = 2      
         self.vwap_len = 12
         self.rvol_threshold = 1.8
         self.trailing_stop_pct = 0.08
         self.take_profit_pct = 0.10
         
-        # Internal State Tracker
-        self.active_positions = {}
+        # Internal State Trackers per sleeve
+        self.active_tech = None # Stores string ticker or None
+        self.active_commodity = None # Stores string ticker or None
+        self.position_metrics = {} # Tracks tracking metadata
 
     @property
     def interval(self): return "5min"
 
-    # Engine pulls data for the 4 tradable assets + QQQ proxy
     @property
     def assets(self): return self.tickers + [self.macro_proxy]
 
@@ -36,14 +38,12 @@ class TradingStrategy(Strategy):
         current_price = df['close'].iloc[-1]
         sma_macro = df['close'].tail(200).mean()
         
-        # MACD calculation for the broad market proxy
         ema12 = df['close'].ewm(span=12, adjust=False).mean()
         ema26 = df['close'].ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
         signal_line = macd_line.ewm(span=9, adjust=False).mean()
         macd_bullish = macd_line.iloc[-1] > signal_line.iloc[-1]
         
-        # Switch flips ON only if broad market is above 200-SMA and MACD is pushing up
         return (current_price > sma_macro) and macd_bullish
 
     def get_conviction_score(self, history):
@@ -60,7 +60,6 @@ class TradingStrategy(Strategy):
         
         sma_macro = df['close'].tail(200).mean()
 
-        # MACD calculation for the specific asset
         ema12 = df['close'].ewm(span=12, adjust=False).mean()
         ema26 = df['close'].ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
@@ -75,33 +74,40 @@ class TradingStrategy(Strategy):
         d = data.get("ohlcv")
         if not d: return None
         
-        # --- THE DATA SCRUBBER ---
         raw_holdings = data.get("holdings", {})
         holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
         
         state_changed = False
 
         # --- PHASE 1: SWING MANAGEMENT (Exits) ---
-        for t in list(self.active_positions.keys()):
+        active_list = []
+        if self.active_tech: active_list.append(self.active_tech)
+        if self.active_commodity: active_list.append(self.active_commodity)
+
+        for t in active_list:
             if t not in d[-1]: continue
             
             cp = d[-1][t]["close"]
-            metrics = self.active_positions[t]
+            metrics = self.position_metrics[t]
             
             if cp > metrics["peak_price"]:
-                self.active_positions[t]["peak_price"] = cp
+                self.position_metrics[t]["peak_price"] = cp
             
             # Take Profit Exit
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
-                del self.active_positions[t]
+                if t in self.tech_tickers: self.active_tech = None
+                else: self.active_commodity = None
+                del self.position_metrics[t]
                 state_changed = True
                 continue
 
             # Trailing Stop Exit
             if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
                 log(f"SWING STOP: {t} exit at {cp}.")
-                del self.active_positions[t]
+                if t in self.tech_tickers: self.active_tech = None
+                else: self.active_commodity = None
+                del self.position_metrics[t]
                 state_changed = True
                 continue
 
@@ -111,49 +117,67 @@ class TradingStrategy(Strategy):
         if len(qqq_hist) > 0:
             macro_safe = self.check_macro_environment(qqq_hist)
 
-        # --- PHASE 3: PREDATORY SELECTION (Entries) ---
-        # The engine will ONLY look for entries if the QQQ Master Switch is 'macro_safe'
-        if len(self.active_positions) < self.max_positions and macro_safe:
-            scores = {}
-            for t in self.tickers:
-                # DUPLICATE SHIELD: Block if active in memory OR physical holdings > 0.01
-                if t in self.active_positions or holdings.get(t, 0) > 0.01:
-                    continue
-                
+        # --- PHASE 3: COMPARTMENTALIZED ENTRY SELECTION ---
+        
+        # Tech Chamber (Sleeve 1)
+        if self.active_tech is None and macro_safe:
+            tech_scores = {}
+            for t in self.tech_tickers:
+                if holdings.get(t, 0) > 0.01: continue
                 hist = [bar[t] for bar in d if t in bar]
                 if len(hist) > 0:
                     score = self.get_conviction_score(hist)
-                    if score > 0:
-                        scores[t] = score
+                    if score > 0: tech_scores[t] = score
             
-            if scores:
-                best_ticker = max(scores, key=scores.get)
-                self.active_positions[best_ticker] = {
-                    "entry_price": d[-1][best_ticker]["close"],
-                    "peak_price": d[-1][best_ticker]["close"]
+            if tech_scores:
+                best_tech = max(tech_scores, key=tech_scores.get)
+                self.active_tech = best_tech
+                self.position_metrics[best_tech] = {
+                    "entry_price": d[-1][best_tech]["close"],
+                    "peak_price": d[-1][best_tech]["close"]
                 }
-                log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
+                log(f"TECH SLEEVE ENTRY (50%): {best_tech} | RVOL: {tech_scores[best_tech]:.2f}")
                 state_changed = True
 
-        # --- PHASE 4: NATIVE ALLOCATION (NO AUTO-BALANCE) ---
+        # Commodity Chamber (Sleeve 2)
+        if self.active_commodity is None:
+            comm_scores = {}
+            for t in self.commodity_tickers:
+                if holdings.get(t, 0) > 0.01: continue
+                hist = [bar[t] for bar in d if t in bar]
+                if len(hist) > 0:
+                    score = self.get_conviction_score(hist)
+                    if score > 0: comm_scores[t] = score
+            
+            if comm_scores:
+                best_comm = max(comm_scores, key=comm_scores.get)
+                self.active_commodity = best_comm
+                self.position_metrics[best_comm] = {
+                    "entry_price": d[-1][best_comm]["close"],
+                    "peak_price": d[-1][best_comm]["close"]
+                }
+                log(f"COMMODITY SLEEVE ENTRY (50%): {best_comm} | RVOL: {comm_scores[best_comm]:.2f}")
+                state_changed = True
+
+        # --- PHASE 4: NATIVE ALLOCATION ---
         if state_changed:
             alloc = {}
             cash = holdings.get("CASH", 0)
             
-            # Calculate total account equity to lock in exact existing weights
             total_equity = cash
             for ticker, shares in holdings.items():
-                # Explicitly ignore the proxy from allocation math if it ever accidentally registers
                 if ticker in self.tickers and ticker in d[-1] and shares > 0.01:
                     total_equity += shares * d[-1][ticker]["close"]
             
-            for t in self.active_positions:
-                # If we physically hold the asset already, freeze its exact current weight to stop the fractional trim
+            current_actives = []
+            if self.active_tech: current_actives.append(self.active_tech)
+            if self.active_commodity: current_actives.append(self.active_commodity)
+
+            for t in current_actives:
                 if holdings.get(t, 0) > 0.01 and total_equity > 0 and t in d[-1]:
                     current_weight = (holdings[t] * d[-1][t]["close"]) / total_equity
                     alloc[t] = current_weight
                 else:
-                    # If it is a new entry bullet, target the clean 50% allocation
                     alloc[t] = self.allocation_size
                     
             return TargetAllocation(alloc)
