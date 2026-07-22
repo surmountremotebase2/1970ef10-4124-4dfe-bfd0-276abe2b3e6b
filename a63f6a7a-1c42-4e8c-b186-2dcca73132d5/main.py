@@ -1,37 +1,57 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
-import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Original 5-Ticker Macro Roster
+        # Tradable Macro Roster
         self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
        
-        # Dual-Bullet Parameters
-        self.allocation_size = 0.50 # 50% per trade
-        self.max_positions = 2      # Maximum of 2 concurrent bullets
+        # Broad Market Proxy (Monitored only, never traded)
+        self.macro_proxy = "QQQ"
+       
+        # Core Bullet Parameters
+        self.allocation_size = 0.50
+        self.max_positions = 2      
         self.vwap_len = 12
         self.rvol_threshold = 1.8
         self.trailing_stop_pct = 0.08
         self.take_profit_pct = 0.10
        
-        # Upgraded Internal Memory Tracker
-        # Format: {"TICKER": {"entry_price": X, "peak_price": Y}}
+        # Internal State Tracker
         self.active_positions = {}
-        self.exited_tickers = [] # Circuit breaker to handle backtester settlement lag
 
     @property
     def interval(self): return "5min"
 
+    # Engine pulls data for the 5 tradable assets + QQQ proxy
     @property
-    def assets(self): return self.tickers
+    def assets(self): return self.tickers + [self.macro_proxy]
+
+    def check_macro_environment(self, history):
+        """ The Macro Master Switch: Evaluates broad market health """
+        if len(history) < 200: return False
+        df = pd.DataFrame(history)
+       
+        current_price = df['close'].iloc[-1]
+        sma_macro = df['close'].tail(200).mean()
+       
+        # MACD calculation for the broad market proxy
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_bullish = macd_line.iloc[-1] > signal_line.iloc[-1]
+       
+        # Switch flips ON only if broad market is above 200-SMA and MACD is pushing up
+        return (current_price > sma_macro) and macd_bullish
 
     def get_conviction_score(self, history):
+        """ The Individual Asset Trigger """
         if len(history) < 200: return 0
         df = pd.DataFrame(history)
        
-        recent_df = df.tail(12)
+        recent_df = df.tail(self.vwap_len)
         vwap = (recent_df['close'] * recent_df['volume']).sum() / recent_df['volume'].sum()
         current_price = df['close'].iloc[-1]
        
@@ -39,8 +59,15 @@ class TradingStrategy(Strategy):
         rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
        
         sma_macro = df['close'].tail(200).mean()
+
+        # MACD calculation for the specific asset
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_bullish = macd_line.iloc[-1] > signal_line.iloc[-1]
        
-        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold:
+        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold and macd_bullish:
             return rvol
         return 0
 
@@ -48,120 +75,91 @@ class TradingStrategy(Strategy):
         d = data.get("ohlcv")
         if not d: return None
        
-        holdings = data.get("holdings", {})
+        # --- THE DATA SCRUBBER ---
+        raw_holdings = data.get("holdings", {})
+        holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
        
-        # --- AMNESIA RECOVERY CIRCUIT BREAKER (Dual-Bullet Upgraded) ---
-        if holdings:
-            for t in self.tickers:
-                if holdings.get(t, 0) > 0 and t not in self.active_positions:
-                    if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
-                        # Re-sync a missing live position
-                        cp = d[-1][t]["close"] if t in d[-1] else 0
-                        self.active_positions[t] = {"entry_price": cp, "peak_price": cp}
-                        log(f"AMNESIA RECOVERY: Resynced 50% live position for {t}")
-
-        # Clear the lag circuit breaker at the start of a new bar
-        self.exited_tickers = []
         state_changed = False
 
-        # --- 1. SWING MANAGEMENT (Manage held positions independently) ---
-        for t, metrics in list(self.active_positions.items()):
-            current_bar = d[-1].get(t)
-            if not current_bar: continue
+        # --- PHASE 1: SWING MANAGEMENT (Exits) ---
+        for t in list(self.active_positions.keys()):
+            if t not in d[-1]: continue
            
-            cp = current_bar["close"]
+            cp = d[-1][t]["close"]
+            metrics = self.active_positions[t]
            
             if cp > metrics["peak_price"]:
                 self.active_positions[t]["peak_price"] = cp
            
-            # OFFENSIVE EXIT: 10% Target
+            # Take Profit Exit
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
-                self.exited_tickers.append(t)
                 del self.active_positions[t]
                 state_changed = True
                 continue
 
-            # DEFENSIVE EXIT: 8% Trailing Stop
+            # Trailing Stop Exit
             if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
                 log(f"SWING STOP: {t} exit at {cp}.")
-                self.exited_tickers.append(t)
                 del self.active_positions[t]
                 state_changed = True
                 continue
 
-        # --- 2. PREDATORY SELECTION (Deploy available cash reserve) ---
-        if len(self.active_positions) < self.max_positions:
-           
-            # Time Gate: The 10:00 AM Opening Range Block
-            current_time_str = d[-1].get("date") or d[-1].get("time")
-            if not current_time_str:
-                for t in self.tickers:
-                    if t in d[-1] and isinstance(d[-1][t], dict):
-                        current_time_str = d[-1][t].get("date") or d[-1][t].get("time")
-                        if current_time_str:
-                            break
-                           
-            is_safe_trading_window = False
-           
-            if current_time_str:
-                try:
-                    bar_time = pd.to_datetime(current_time_str)
-                    # Core market hours open at 9:30 AM ET. We block buying until 10:00 AM ET.
-                    # This completely flushes opening bell volume imbalances from the 20-bar baseline.
-                    if (10 <= bar_time.hour < 16):
-                        is_safe_trading_window = True
-                except Exception as e:
-                    log(f"Time parsing error: {e}")
+        # --- PHASE 2: THE MACRO MASTER SWITCH ---
+        macro_safe = False
+        qqq_hist = [bar[self.macro_proxy] for bar in d if self.macro_proxy in bar]
+        if len(qqq_hist) > 0:
+            macro_safe = self.check_macro_environment(qqq_hist)
 
-            if is_safe_trading_window:
-                scores = {}
-                for t in self.tickers:
-                    # The Sieve: Prevent buying a ticker we already hold
-                    if t in self.active_positions:
-                        continue
-                   
-                    hist = [bar[t] for bar in d if t in bar]
-                    if len(hist) > 0:
-                        score = self.get_conviction_score(hist)
-                        if score > 0:
-                            scores[t] = score
+        # --- PHASE 3: PREDATORY SELECTION (Entries) ---
+        # The engine will ONLY look for entries if the QQQ Master Switch is 'macro_safe'
+        if len(self.active_positions) < self.max_positions and macro_safe:
+            scores = {}
+            for t in self.tickers:
+                # DUPLICATE SHIELD: Block if active in memory OR physical holdings > 0.01
+                if t in self.active_positions or holdings.get(t, 0) > 0.01:
+                    continue
                
-                if scores:
-                    best_ticker = max(scores, key=scores.get)
-                   
-                    self.active_positions[best_ticker] = {
-                        "entry_price": d[-1][best_ticker]["close"],
-                        "peak_price": d[-1][best_ticker]["close"]
-                    }
-                    state_changed = True
-                   
-                    log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
-
-        # --- 3. ALLOCATION EXECUTION (Anti-Rebalancing Dynamic Freeze) ---
-        # Calculate true total portfolio equity (Holdings + Cash) on every single bar
-        total_portfolio_value = 0
-        for t in self.tickers:
-            shares = holdings.get(t, 0)
-            if shares > 0 and t in d[-1]:
-                total_portfolio_value += shares * d[-1][t]["close"]
-       
-        cash = holdings.get("CASH", 0)
-        total_portfolio_value += cash
-
-        # Continuously emit allocations to overwrite Surmount's internal robo-advisor rebalancing
-        if total_portfolio_value > 0 and (state_changed or len(self.active_positions) > 0):
-            new_allocation = {}
-            for t in self.active_positions:
-                shares = holdings.get(t, 0)
-                if shares > 0 and t in d[-1]:
-                    # Position exists: Lock its exact current drifted weight to freeze execution
-                    new_allocation[t] = (shares * d[-1][t]["close"]) / total_portfolio_value
-                else:
-                    # Brand new entry: Deploy remaining cash up to a strict 50% limit
-                    cash_pct = cash / total_portfolio_value
-                    new_allocation[t] = min(self.allocation_size, cash_pct)
+                hist = [bar[t] for bar in d if t in bar]
+                if len(hist) > 0:
+                    score = self.get_conviction_score(hist)
+                    if score > 0:
+                        scores[t] = score
            
-            return TargetAllocation(new_allocation)
+            if scores:
+                best_ticker = max(scores, key=scores.get)
+                self.active_positions[best_ticker] = {
+                    "entry_price": d[-1][best_ticker]["close"],
+                    "peak_price": d[-1][best_ticker]["close"]
+                }
+                log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
+                state_changed = True
+
+        # --- PHASE 4: NATIVE ALLOCATION (DYNAMIC REMAINDER) ---
+        if state_changed:
+            alloc = {}
+            frozen_weight = 0.0
+            
+            # 1. Freeze active positions exactly at their drifted weights
+            for t in list(self.active_positions.keys()):
+                if holdings.get(t, 0) > 0.01:
+                    current_w = holdings[t]
+                    alloc[t] = current_w
+                    frozen_weight += current_w
+            
+            # 2. Identify new entry targets
+            new_entries = [t for t in self.active_positions if holdings.get(t, 0) <= 0.01]
+            
+            # 3. Allocate ONLY the mathematical remainder to the new bullet
+            if new_entries:
+                remaining_weight = 1.0 - frozen_weight
+                
+                # Prevent over-allocation errors
+                if remaining_weight > 0:
+                    weight_per_new = remaining_weight / len(new_entries)
+                    for t in new_entries:
+                        alloc[t] = weight_per_new
+                        
+            return TargetAllocation(alloc)
 
         return None
