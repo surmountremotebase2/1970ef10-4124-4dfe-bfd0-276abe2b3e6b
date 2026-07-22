@@ -75,10 +75,10 @@ class TradingStrategy(Strategy):
                 ticker_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
                 df = pd.DataFrame(ticker_data)
                 
-                if len(df) < 25: 
+                # The engine must wait for 780 periods (10 days) of data to build the structural filter
+                if len(df) < 780: 
                     continue
                 
-                df['date'] = pd.to_datetime(df['date'])
                 current_price = df['close'].iloc[-1]
                 
                 # Trigger 1: Intraday Momentum (12-period VWMA)
@@ -96,17 +96,9 @@ class TradingStrategy(Strategy):
                 df['vol_sma_20'] = ta.sma(df['volume'], length=20)
                 rvol = df['volume'].iloc[-1] / df['vol_sma_20'].iloc[-1]
                 
-                # Trigger 4: True Daily Macro Shield (Asset-Specific 200 SMA)
-                # Resample the 5-minute data stream into daily bars
-                df.set_index('date', inplace=True)
-                daily_df = df.resample('B').agg({'close': 'last'}).dropna()
-                
-                # Ensure we have enough daily data to calculate a 200-day SMA
-                if len(daily_df) >= 200:
-                    daily_df['sma_200'] = ta.sma(daily_df['close'], length=200)
-                    macro_safe = current_price > daily_df['sma_200'].iloc[-1]
-                else:
-                    macro_safe = False 
+                # Trigger 4: 10-Day Structural Filter (780-period SMA on 5min)
+                df['sma_780'] = ta.sma(df['close'], length=780)
+                macro_safe = current_price > df['sma_780'].iloc[-1]
 
                 # Execution Filter
                 if vwap_bullish and macro_safe and rvol >= 1.8 and macd_bullish:
