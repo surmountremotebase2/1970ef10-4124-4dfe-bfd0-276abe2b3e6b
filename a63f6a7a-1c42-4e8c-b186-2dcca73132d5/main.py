@@ -140,12 +140,20 @@ class TradingStrategy(Strategy):
             alloc = {}
             frozen_weight = 0.0
             
-            # 1. Freeze active positions exactly at their drifted weights
+            # Calculate total equity to convert shares into percentages
+            cash = holdings.get("CASH", 0)
+            total_equity = cash
+            for ticker, shares in holdings.items():
+                if ticker in d[-1] and shares > 0.01:
+                    total_equity += shares * d[-1][ticker]["close"]
+
+            # 1. Freeze active positions exactly at their drifted percentages
             for t in list(self.active_positions.keys()):
-                if holdings.get(t, 0) > 0.01:
-                    current_w = holdings[t]
-                    alloc[t] = current_w
-                    frozen_weight += current_w
+                shares = holdings.get(t, 0)
+                if shares > 0.01 and total_equity > 0 and t in d[-1]:
+                    current_pct = (shares * d[-1][t]["close"]) / total_equity
+                    alloc[t] = current_pct
+                    frozen_weight += current_pct
             
             # 2. Identify new entry targets
             new_entries = [t for t in self.active_positions if holdings.get(t, 0) <= 0.01]
