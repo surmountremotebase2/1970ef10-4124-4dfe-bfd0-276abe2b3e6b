@@ -1,173 +1,139 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
+import pandas_ta as ta
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Tradable Macro Roster
-        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
-       
-        # Broad Market Proxy (Monitored only, never traded)
-        self.macro_proxy = "QQQ"
-       
-        # Core Bullet Parameters
-        self.allocation_size = 0.50
-        self.max_positions = 2      
-        self.vwap_len = 12
-        self.rvol_threshold = 1.8
-        self.trailing_stop_pct = 0.08
-        self.take_profit_pct = 0.10
-       
-        # Internal State Tracker
-        self.active_positions = {}
+        # Tradable universe
+        self.tickers = ["SOXL", "TECL", "AGQ", "UCO", "GDXU"]
+        self.max_positions = 2
+        self.take_profit = 0.10
+        self.trailing_stop = 0.08
+        
+        # State tracking for exits
+        self.entry_prices = {}
+        self.high_water_marks = {}
 
     @property
-    def interval(self): return "5min"
+    def interval(self):
+        return "5min"
 
-    # Engine pulls data for the 5 tradable assets + QQQ proxy
     @property
-    def assets(self): return self.tickers + [self.macro_proxy]
-
-    def check_macro_environment(self, history):
-        """ The Macro Master Switch: Evaluates broad market health """
-        if len(history) < 200: return False
-        df = pd.DataFrame(history)
-       
-        current_price = df['close'].iloc[-1]
-        sma_macro = df['close'].tail(200).mean()
-       
-        # MACD calculation for the broad market proxy
-        ema12 = df['close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['close'].ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        macd_bullish = macd_line.iloc[-1] > signal_line.iloc[-1]
-       
-        # Switch flips ON only if broad market is above 200-SMA and MACD is pushing up
-        return (current_price > sma_macro) and macd_bullish
-
-    def get_conviction_score(self, history):
-        """ The Individual Asset Trigger """
-        if len(history) < 200: return 0
-        df = pd.DataFrame(history)
-       
-        recent_df = df.tail(self.vwap_len)
-        vwap = (recent_df['close'] * recent_df['volume']).sum() / recent_df['volume'].sum()
-        current_price = df['close'].iloc[-1]
-       
-        avg_vol = df['volume'].tail(20).mean()
-        rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
-       
-        sma_macro = df['close'].tail(200).mean()
-
-        # MACD calculation for the specific asset
-        ema12 = df['close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['close'].ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        macd_bullish = macd_line.iloc[-1] > signal_line.iloc[-1]
-       
-        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold and macd_bullish:
-            return rvol
-        return 0
+    def assets(self):
+        return self.tickers
 
     def run(self, data):
-        d = data.get("ohlcv")
-        if not d: return None
-       
-        # --- THE DATA SCRUBBER ---
-        raw_holdings = data.get("holdings", {})
-        holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
-       
-        state_changed = False
-
-        # --- PHASE 1: SWING MANAGEMENT (Exits) ---
-        for t in list(self.active_positions.keys()):
-            if t not in d[-1]: continue
-           
-            cp = d[-1][t]["close"]
-            metrics = self.active_positions[t]
-           
-            if cp > metrics["peak_price"]:
-                self.active_positions[t]["peak_price"] = cp
-           
-            # Take Profit Exit
-            if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {t} exit at {cp}.")
-                del self.active_positions[t]
-                state_changed = True
+        holdings = data["holdings"]
+        allocations = {}
+        frozen_weight = 0.0
+        
+        # 1. Manage Active Positions (Exits)
+        active_tickers = [ticker for ticker in holdings if holdings[ticker] > 0]
+        
+        for ticker in active_tickers:
+            ticker_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
+            if not ticker_data:
                 continue
-
-            # Trailing Stop Exit
-            if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
-                log(f"SWING STOP: {t} exit at {cp}.")
-                del self.active_positions[t]
-                state_changed = True
-                continue
-
-        # --- PHASE 2: THE MACRO MASTER SWITCH ---
-        macro_safe = False
-        qqq_hist = [bar[self.macro_proxy] for bar in d if self.macro_proxy in bar]
-        if len(qqq_hist) > 0:
-            macro_safe = self.check_macro_environment(qqq_hist)
-
-        # --- PHASE 3: PREDATORY SELECTION (Entries) ---
-        # The engine will ONLY look for entries if the QQQ Master Switch is 'macro_safe'
-        if len(self.active_positions) < self.max_positions and macro_safe:
-            scores = {}
-            for t in self.tickers:
-                # DUPLICATE SHIELD: Block if active in memory OR physical holdings > 0.01
-                if t in self.active_positions or holdings.get(t, 0) > 0.01:
-                    continue
-               
-                hist = [bar[t] for bar in d if t in bar]
-                if len(hist) > 0:
-                    score = self.get_conviction_score(hist)
-                    if score > 0:
-                        scores[t] = score
-           
-            if scores:
-                best_ticker = max(scores, key=scores.get)
-                self.active_positions[best_ticker] = {
-                    "entry_price": d[-1][best_ticker]["close"],
-                    "peak_price": d[-1][best_ticker]["close"]
-                }
-                log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
-                state_changed = True
-
-        # --- PHASE 4: NATIVE ALLOCATION (DYNAMIC REMAINDER) ---
-        if state_changed:
-            alloc = {}
-            frozen_weight = 0.0
-            
-            # Calculate total equity to convert shares into percentages
-            cash = holdings.get("CASH", 0)
-            total_equity = cash
-            for ticker, shares in holdings.items():
-                if ticker in d[-1] and shares > 0.01:
-                    total_equity += shares * d[-1][ticker]["close"]
-
-            # 1. Freeze active positions exactly at their drifted percentages
-            for t in list(self.active_positions.keys()):
-                shares = holdings.get(t, 0)
-                if shares > 0.01 and total_equity > 0 and t in d[-1]:
-                    current_pct = (shares * d[-1][t]["close"]) / total_equity
-                    alloc[t] = current_pct
-                    frozen_weight += current_pct
-            
-            # 2. Identify new entry targets
-            new_entries = [t for t in self.active_positions if holdings.get(t, 0) <= 0.01]
-            
-            # 3. Allocate ONLY the mathematical remainder to the new bullet
-            if new_entries:
-                remaining_weight = 1.0 - frozen_weight
                 
-                # Prevent over-allocation errors
-                if remaining_weight > 0:
-                    weight_per_new = remaining_weight / len(new_entries)
-                    for t in new_entries:
-                        alloc[t] = weight_per_new
-                        
-            return TargetAllocation(alloc)
+            current_price = ticker_data[-1]["close"]
+            entry_price = self.entry_prices.get(ticker, current_price)
+            
+            # Update high water mark for the trailing stop
+            if ticker not in self.high_water_marks:
+                self.high_water_marks[ticker] = current_price
+            self.high_water_marks[ticker] = max(self.high_water_marks[ticker], current_price)
+            
+            highest_price = self.high_water_marks[ticker]
+            
+            # Exit Logic
+            if current_price >= entry_price * (1.0 + self.take_profit):
+                allocations[ticker] = 0.0 
+                self.entry_prices.pop(ticker, None)
+                self.high_water_marks.pop(ticker, None)
+                log(f"TAKE PROFIT: {ticker} exit at {current_price}")
+                
+            elif current_price <= highest_price * (1.0 - self.trailing_stop):
+                allocations[ticker] = 0.0 
+                self.entry_prices.pop(ticker, None)
+                self.high_water_marks.pop(ticker, None)
+                log(f"SWING STOP: {ticker} exit at {current_price}")
+                
+            else:
+                # Freeze position at the strict 50% weight
+                allocations[ticker] = 0.50
+                frozen_weight += 0.50
 
-        return None
+        # 2. Scan for New Entries
+        if len(active_tickers) < self.max_positions:
+            candidates = {}
+            
+            for ticker in self.tickers:
+                if ticker in active_tickers:
+                    continue
+                    
+                ticker_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
+                df = pd.DataFrame(ticker_data)
+                
+                if len(df) < 25: 
+                    continue
+                
+                df['date'] = pd.to_datetime(df['date'])
+                current_price = df['close'].iloc[-1]
+                
+                # Trigger 1: Intraday Momentum (12-period VWMA)
+                df['vwma_12'] = ta.vwma(df['close'], df['volume'], length=12)
+                vwap_bullish = current_price > df['vwma_12'].iloc[-1]
+                
+                # Trigger 2: Asset Momentum (MACD)
+                macd = ta.macd(df['close'])
+                if macd is not None and not macd.empty:
+                    macd_bullish = macd['MACD_12_26_9'].iloc[-1] > macd['MACDs_12_26_9'].iloc[-1]
+                else:
+                    macd_bullish = False
+                
+                # Trigger 3: Predatory Volume (RVOL >= 1.8)
+                df['vol_sma_20'] = ta.sma(df['volume'], length=20)
+                rvol = df['volume'].iloc[-1] / df['vol_sma_20'].iloc[-1]
+                
+                # Trigger 4: True Daily Macro Shield (Asset-Specific 200 SMA)
+                # Resample the 5-minute data stream into daily bars
+                df.set_index('date', inplace=True)
+                daily_df = df.resample('B').agg({'close': 'last'}).dropna()
+                
+                # Ensure we have enough daily data to calculate a 200-day SMA
+                if len(daily_df) >= 200:
+                    daily_df['sma_200'] = ta.sma(daily_df['close'], length=200)
+                    macro_safe = current_price > daily_df['sma_200'].iloc[-1]
+                else:
+                    macro_safe = False 
+
+                # Execution Filter
+                if vwap_bullish and macro_safe and rvol >= 1.8 and macd_bullish:
+                    candidates[ticker] = rvol
+
+            # 3. Dynamic Remainder Execution
+            if candidates:
+                # Rank candidates by strongest RVOL spike
+                sorted_candidates = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
+                
+                for ticker, rvol_score in sorted_candidates:
+                    # Check capacity before firing
+                    if len([k for k, v in allocations.items() if v > 0]) < self.max_positions:
+                        
+                        # Calculate exact remaining capital
+                        remaining_weight = 1.0 - frozen_weight
+                        target_weight = min(0.50, remaining_weight)
+                        
+                        if target_weight > 0:
+                            allocations[ticker] = target_weight
+                            frozen_weight += target_weight
+                            
+                            # Log entry for tracking
+                            entry_px = df['close'].iloc[-1]
+                            self.entry_prices[ticker] = entry_px
+                            self.high_water_marks[ticker] = entry_px
+                            
+                            log(f"SWING ENTRY ({int(target_weight*100)}%): {ticker} | RVOL: {rvol_score:.2f}")
+
+        return TargetAllocation(allocations)
