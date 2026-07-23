@@ -1,127 +1,139 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
 import pandas as pd
-import numpy as np
+import pandas_ta as ta
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Final 2026 Macro Roster
-        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
+        # Tradable universe
+        self.tickers = ["SOXL", "TECL", "AGQ", "UCO", "GDXU"]
+        self.max_positions = 2
+        self.take_profit = 0.10
+        self.trailing_stop = 0.08
        
-        # Core Engine Parameters
-        self.vwap_len = 12
-        self.rvol_threshold = 1.8
-        self.trailing_stop_pct = 0.08
-        self.take_profit_pct = 0.10
-        self.max_allocation = 1.00
-       
-        # Internal Memory Trackers
-        self.active_trade = False
-        self.active_ticker = None
-        self.peak_price = None
-        self.entry_price = None
-        self.exited_ticker = None # Circuit breaker to handle backtester settlement lag
+        # State tracking for exits
+        self.entry_prices = {}
+        self.high_water_marks = {}
 
     @property
-    def interval(self): return "5min"
+    def interval(self):
+        return "5min"
 
     @property
-    def assets(self): return self.tickers
-
-    def get_conviction_score(self, history):
-        if len(history) < 78: return 0
-        df = pd.DataFrame(history)
-       
-        recent_df = df.tail(12)
-        vwap = (recent_df['close'] * recent_df['volume']).sum() / recent_df['volume'].sum()
-        current_price = df['close'].iloc[-1]
-       
-        avg_vol = df['volume'].tail(20).mean()
-        rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
-       
-        sma_macro = df['close'].mean()
-       
-        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold:
-            return rvol
-        return 0
+    def assets(self):
+        return self.tickers
 
     def run(self, data):
-        d = data.get("ohlcv")
-        if not d: return None
+        holdings = data["holdings"]
+        allocations = {}
+        frozen_weight = 0.0
        
-        holdings = data.get("holdings", {})
+        # 1. Manage Active Positions (Exits)
+        active_tickers = [ticker for ticker in holdings if holdings[ticker] > 0]
        
-        # --- AMNESIA RECOVERY CIRCUIT BREAKER ---
-        # If internal state says we are in cash, check if the live broker feed disagrees.
-        if not self.active_trade and holdings:
-            for t in self.tickers:
-                if holdings.get(t, 0) > 0:
-                    # If this matches the ticker we JUST exited, ignore it (it's backtest lag)
-                    if t != self.exited_ticker:
-                        self.active_trade = True
-                        self.active_ticker = t
-                        log(f"AMNESIA RECOVERY: Resynced live position for {t}")
-                        break
+        for ticker in active_tickers:
+            ticker_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
+            if not ticker_data:
+                continue
+               
+            current_price = ticker_data[-1]["close"]
+            entry_price = self.entry_prices.get(ticker, current_price)
+           
+            # Update high water mark for the trailing stop
+            if ticker not in self.high_water_marks:
+                self.high_water_marks[ticker] = current_price
+            self.high_water_marks[ticker] = max(self.high_water_marks[ticker], current_price)
+           
+            highest_price = self.high_water_marks[ticker]
+           
+            # Exit Logic
+            if current_price >= entry_price * (1.0 + self.take_profit):
+                allocations[ticker] = 0.0
+                self.entry_prices.pop(ticker, None)
+                self.high_water_marks.pop(ticker, None)
+                log(f"TAKE PROFIT: {ticker} exit at {current_price}")
+               
+            elif current_price <= highest_price * (1.0 - self.trailing_stop):
+                allocations[ticker] = 0.0
+                self.entry_prices.pop(ticker, None)
+                self.high_water_marks.pop(ticker, None)
+                log(f"SWING STOP: {ticker} exit at {current_price}")
+               
+            else:
+                # Freeze position at the strict 50% weight
+                allocations[ticker] = 0.50
+                frozen_weight += 0.50
 
-        # --- 1. SWING MANAGEMENT (10% Take-Profit & 8% Trailing Stop) ---
-        if self.active_trade and self.active_ticker:
-            current_bar = d[-1].get(self.active_ticker)
-            if not current_bar: return None
+        # 2. Scan for New Entries
+        if len(active_tickers) < self.max_positions:
+            candidates = {}
            
-            cp = current_bar["close"]
-           
-            # Baseline tracking initialization during an amnesia recovery
-            if self.peak_price is None or self.entry_price is None:
-                self.peak_price = cp
-                self.entry_price = cp
-                log(f"RECOVERY INITIALIZATION: Set tracking baseline for {self.active_ticker} at {cp}")
-           
-            if cp > self.peak_price:
-                self.peak_price = cp
-           
-            # OFFENSIVE EXIT: 10% Target
-            if cp >= self.entry_price * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {self.active_ticker} exit at {cp}.")
-                self.exited_ticker = self.active_ticker # Set circuit breaker
-                self.active_trade = False
-                self.active_ticker = None
-                self.peak_price = None
-                self.entry_price = None
-                return TargetAllocation({})
+            for ticker in self.tickers:
+                if ticker in active_tickers:
+                    continue
+                   
+                ticker_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
+                df = pd.DataFrame(ticker_data)
+               
+                if len(df) < 25:
+                    continue
+               
+                df['date'] = pd.to_datetime(df['date'])
+                current_price = df['close'].iloc[-1]
+               
+                # Trigger 1: Intraday Momentum (12-period VWMA)
+                df['vwma_12'] = ta.vwma(df['close'], df['volume'], length=12)
+                vwap_bullish = current_price > df['vwma_12'].iloc[-1]
+               
+                # Trigger 2: Asset Momentum (MACD)
+                macd = ta.macd(df['close'])
+                if macd is not None and not macd.empty:
+                    macd_bullish = macd['MACD_12_26_9'].iloc[-1] > macd['MACDs_12_26_9'].iloc[-1]
+                else:
+                    macd_bullish = False
+               
+                # Trigger 3: Predatory Volume (RVOL >= 1.8)
+                df['vol_sma_20'] = ta.sma(df['volume'], length=20)
+                rvol = df['volume'].iloc[-1] / df['vol_sma_20'].iloc[-1]
+               
+                # Trigger 4: True Daily Macro Shield (Asset-Specific 200 SMA)
+                # Resample the 5-minute data stream into daily bars
+                df.set_index('date', inplace=True)
+                daily_df = df.resample('B').agg({'close': 'last'}).dropna()
+               
+                # Ensure we have enough daily data to calculate a 200-day SMA
+                if len(daily_df) >= 200:
+                    daily_df['sma_200'] = ta.sma(daily_df['close'], length=200)
+                    macro_safe = current_price > daily_df['sma_200'].iloc[-1]
+                else:
+                    macro_safe = False
 
-            # DEFENSIVE EXIT: 8% Trailing Stop
-            if cp <= self.peak_price * (1 - self.trailing_stop_pct):
-                log(f"SWING STOP: {self.active_ticker} exit at {cp}.")
-                self.exited_ticker = self.active_ticker # Set circuit breaker
-                self.active_trade = False
-                self.active_ticker = None
-                self.peak_price = None
-                self.entry_price = None
-                return TargetAllocation({})
-           
-            return None
+                # Execution Filter
+                if vwap_bullish and macro_safe and rvol >= 1.8 and macd_bullish:
+                    candidates[ticker] = rvol
 
-        # --- 2. PREDATORY SELECTION (New Entries) ---
-        scores = {}
-        for t in self.tickers:
-            hist = [bar[t] for bar in d if t in bar]
-            if len(hist) > 0:
-                score = self.get_conviction_score(hist)
-                if score > 0:
-                    scores[t] = score
-       
-        if scores:
-            best_ticker = max(scores, key=scores.get)
-           
-            # Clear the circuit breaker since we are opening a fresh, legitimate trade
-            self.exited_ticker = None
-           
-            self.active_ticker = best_ticker
-            self.active_trade = True
-            self.peak_price = d[-1][best_ticker]["close"]
-            self.entry_price = d[-1][best_ticker]["close"]
-           
-            log(f"SWING ENTRY: {best_ticker} | RVOL: {scores[best_ticker]:.2f} | Entry: {self.entry_price}")
-            return TargetAllocation({best_ticker: self.max_allocation})
+            # 3. Dynamic Remainder Execution
+            if candidates:
+                # Rank candidates by strongest RVOL spike
+                sorted_candidates = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
+               
+                for ticker, rvol_score in sorted_candidates:
+                    # Check capacity before firing
+                    if len([k for k, v in allocations.items() if v > 0]) < self.max_positions:
+                       
+                        # Calculate exact remaining capital
+                        remaining_weight = 1.0 - frozen_weight
+                        target_weight = min(0.50, remaining_weight)
+                       
+                        if target_weight > 0:
+                            allocations[ticker] = target_weight
+                            frozen_weight += target_weight
+                           
+                            # Log entry for tracking
+                            entry_px = df['close'].iloc[-1]
+                            self.entry_prices[ticker] = entry_px
+                            self.high_water_marks[ticker] = entry_px
+                           
+                            log(f"SWING ENTRY ({int(target_weight*100)}%): {ticker} | RVOL: {rvol_score:.2f}")
 
-        return None
+        return TargetAllocation(allocations)
