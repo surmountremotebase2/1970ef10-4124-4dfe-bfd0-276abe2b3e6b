@@ -28,6 +28,9 @@ class TradingStrategy(Strategy):
         allocations = {}
         frozen_weight = 0.0
         
+        # Gatekeeper flag to prevent fractional churn
+        state_changed = False 
+        
         # 1. Manage Active Positions (Exits)
         active_tickers = [ticker for ticker in holdings if holdings[ticker] > 0]
         
@@ -52,15 +55,17 @@ class TradingStrategy(Strategy):
                 self.entry_prices.pop(ticker, None)
                 self.high_water_marks.pop(ticker, None)
                 log(f"TAKE PROFIT: {ticker} exit at {current_price}")
+                state_changed = True
                 
             elif current_price <= highest_price * (1.0 - self.trailing_stop):
                 allocations[ticker] = 0.0 
                 self.entry_prices.pop(ticker, None)
                 self.high_water_marks.pop(ticker, None)
                 log(f"SWING STOP: {ticker} exit at {current_price}")
+                state_changed = True
                 
             else:
-                # Freeze position at the strict 50% weight
+                # Freeze position at the strict 50% weight for internal math tracking
                 allocations[ticker] = 0.50
                 frozen_weight += 0.50
 
@@ -75,7 +80,6 @@ class TradingStrategy(Strategy):
                 ticker_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
                 df = pd.DataFrame(ticker_data)
                 
-                # Ensure we have enough 5-minute data for the 200 SMA inside the sliding window
                 if len(df) < 200: 
                     continue
                 
@@ -106,14 +110,11 @@ class TradingStrategy(Strategy):
 
             # 3. Dynamic Remainder Execution
             if candidates:
-                # Rank candidates by strongest RVOL spike
                 sorted_candidates = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
                 
                 for ticker, rvol_score in sorted_candidates:
-                    # Check capacity before firing
                     if len([k for k, v in allocations.items() if v > 0]) < self.max_positions:
                         
-                        # Calculate exact remaining capital
                         remaining_weight = 1.0 - frozen_weight
                         target_weight = min(0.50, remaining_weight)
                         
@@ -121,11 +122,16 @@ class TradingStrategy(Strategy):
                             allocations[ticker] = target_weight
                             frozen_weight += target_weight
                             
-                            # Log entry for tracking
                             entry_px = df['close'].iloc[-1]
                             self.entry_prices[ticker] = entry_px
                             self.high_water_marks[ticker] = entry_px
                             
                             log(f"SWING ENTRY ({int(target_weight*100)}%): {ticker} | RVOL: {rvol_score:.2f}")
+                            state_changed = True
 
-        return TargetAllocation(allocations)
+        # ONLY interact with the engine if a trade was triggered
+        if state_changed:
+            return TargetAllocation(allocations)
+        
+        # Bypass the execution engine to prevent fractional churn
+        return None
