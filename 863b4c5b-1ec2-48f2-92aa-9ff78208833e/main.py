@@ -28,12 +28,12 @@ class TradingStrategy(Strategy):
         allocations = {}
         frozen_weight = 0.0
         
-        # Gatekeeper flag to prevent fractional churn
+        # Gatekeeper: Only flips to True on explicit entry or exit
         state_changed = False 
         
-        # 1. Manage Active Positions (Exits)
         active_tickers = [ticker for ticker in holdings if holdings[ticker] > 0]
         
+        # 1. Manage Active Positions (Exits)
         for ticker in active_tickers:
             ticker_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
             if not ticker_data:
@@ -42,14 +42,12 @@ class TradingStrategy(Strategy):
             current_price = ticker_data[-1]["close"]
             entry_price = self.entry_prices.get(ticker, current_price)
             
-            # Update high water mark for the trailing stop
             if ticker not in self.high_water_marks:
                 self.high_water_marks[ticker] = current_price
             self.high_water_marks[ticker] = max(self.high_water_marks[ticker], current_price)
             
             highest_price = self.high_water_marks[ticker]
             
-            # Exit Logic
             if current_price >= entry_price * (1.0 + self.take_profit):
                 allocations[ticker] = 0.0 
                 self.entry_prices.pop(ticker, None)
@@ -65,7 +63,7 @@ class TradingStrategy(Strategy):
                 state_changed = True
                 
             else:
-                # Freeze position at the strict 50% weight for internal math tracking
+                # Maintain math for dynamic remainder sizing, DO NOT flip state_changed
                 allocations[ticker] = 0.50
                 frozen_weight += 0.50
 
@@ -81,6 +79,13 @@ class TradingStrategy(Strategy):
                 df = pd.DataFrame(ticker_data)
                 
                 if len(df) < 200: 
+                    continue
+                
+                df['date'] = pd.to_datetime(df['date'])
+                last_timestamp = df['date'].iloc[-1]
+                
+                # Time Shield: Ignore the 9:00 AM hour to let RVOL normalize
+                if last_timestamp.hour == 9:
                     continue
                 
                 current_price = df['close'].iloc[-1]
@@ -129,9 +134,8 @@ class TradingStrategy(Strategy):
                             log(f"SWING ENTRY ({int(target_weight*100)}%): {ticker} | RVOL: {rvol_score:.2f}")
                             state_changed = True
 
-        # ONLY interact with the engine if a trade was triggered
+        # Pass target allocation to engine ONLY if an explicit trade logic condition was met
         if state_changed:
             return TargetAllocation(allocations)
-        
-        # Bypass the execution engine to prevent fractional churn
+            
         return None
