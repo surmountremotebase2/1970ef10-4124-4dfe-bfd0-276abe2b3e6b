@@ -9,13 +9,13 @@ class TradingStrategy(Strategy):
         # Tradable universe (all 2x/3x leveraged)
         self.tickers = ["SOXL", "TECL", "AGQ", "UCO", "GDXU"]
         
-        # Core parameters (easy to tune)
+        # Core parameters
         self.max_positions = 2
         self.take_profit = 0.10 # 10% take profit
-        self.atr_multiplier = 2.8 # ATR trailing stop multiplier
+        self.atr_multiplier = 3.5 # widened from 2.8
         self.min_hold_bars = 6 # \~30 minutes minimum hold
         self.max_hold_bars = 300 # \~4 trading days hard maximum hold
-        self.rvol_threshold = 2.2 # raised from 2.0
+        self.rvol_threshold = 2.2
         self.max_extension = 0.018 # max 1.8% above VWMA
         
         # State tracking
@@ -44,7 +44,7 @@ class TradingStrategy(Strategy):
         # -------------------------------------------------
         for ticker in active_tickers:
             full_data = [row[ticker] for row in data["ohlcv"] if ticker in row]
-            if not full_data or len(full_data) < 30: # need enough bars for ATR
+            if not full_data or len(full_data) < 30:
                 continue
             
             df = pd.DataFrame(full_data)
@@ -75,8 +75,7 @@ class TradingStrategy(Strategy):
             # ATR-based trailing stop
             atr = ta.atr(df['high'], df['low'], df['close'], length=14)
             if atr is None or pd.isna(atr.iloc[-1]):
-                # Fallback to fixed % if ATR unavailable
-                trailing_stop_trigger = highest * (1.0 - 0.10)
+                trailing_stop_trigger = highest * (1.0 - 0.12) # fallback
             else:
                 trail_distance = atr.iloc[-1] * self.atr_multiplier
                 trailing_stop_trigger = highest - trail_distance
@@ -86,15 +85,10 @@ class TradingStrategy(Strategy):
             # ----- EXIT LOGIC -----
             exit_reason = None
             
-            # 1. Take Profit (use HIGH of bar)
             if current_high >= take_profit_trigger:
                 exit_reason = "TAKE PROFIT"
-            
-            # 2. ATR Trailing Stop (use LOW of bar)
             elif current_low <= trailing_stop_trigger:
                 exit_reason = "ATR TRAILING STOP"
-            
-            # 3. Hard maximum hold time
             elif bars_held >= self.max_hold_bars:
                 exit_reason = "MAX HOLD TIME"
             
