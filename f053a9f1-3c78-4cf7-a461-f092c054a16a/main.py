@@ -6,21 +6,21 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    SIGNAL v1 — PULLBACK-IN-UPTREND entry.
-    Inverse of the original RVOL-spike logic: buy the dip inside an intact
-    trend, on CALM volume, rather than buying the volume explosion.
+    SIGNAL v3 — SUSTAINED VOLUME (institutional accumulation detection).
 
-    Entry requires ALL of:
-      1. price > 50-bar SMA (trend intact)
-      2. pulled back 1.5%-6% from the 24-bar high (not buying the top)
-      3. RVOL <= 1.5 (calm, not a climax bar)
-    Ranked by pullback depth — deepest qualifying dip wins the slot.
+    The anti-fakeout premise: a single volume spike is a fakeout signature.
+    Real accumulation shows elevated volume SUSTAINED across many bars.
 
-    Exits unchanged and validated: 10% TP, 8% trailing, 12% hard, 96-bar time.
-    Clusters unchanged: tech (TECL/SOXL exclusive), silver, gold, energy.
+    Entry requires BOTH:
+      1. price > own 50-bar SMA (trend intact)
+      2. EVERY one of the last 4 bars >= 1.3x baseline volume,
+         where baseline = mean volume of the 20 bars BEFORE that window
+         (prevents the surge from inflating its own comparison)
 
-    Seed now only breaks ties. If the signal is real, seeds should converge.
-    Random baseline to beat (same window): 10.10 / 33.92 / 66.56 / 104.77 / 158.47, mean ~75%.
+    Ranked by average sustained RVOL. Seed breaks ties only.
+    Exits unchanged: 10% TP, 8% trailing, 12% hard, 96-bar time.
+
+    Random baseline to beat: mean ~75% (10.10 / 33.92 / 66.56 / 104.77 / 158.47).
     Run on 2022-07-31 to 2023-07-31, slippage 0.
     """
 
@@ -44,13 +44,11 @@ class TradingStrategy(Strategy):
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        # --- SIGNAL PARAMETERS ---
+        # --- SUSTAINED VOLUME PARAMETERS ---
         self.trend_lookback = 50
-        self.high_lookback = 24
-        self.min_pullback = 0.015
-        self.max_pullback = 0.06
-        self.rvol_ceiling = 1.5
-        self.vol_lookback = 20
+        self.sustain_bars = 4 # 20 minutes of continuous elevated volume
+        self.sustain_rvol_min = 1.3 # every bar in the window must clear this
+        self.vol_baseline_bars = 20 # baseline measured BEFORE the window
 
         self.seed = 42
         self.rng = random.Random(self.seed)
@@ -59,7 +57,8 @@ class TradingStrategy(Strategy):
         self.active_positions = {}
         self.cooldown = {}
         self.bar_count = 0
-        self.qualify_count = 0
+        self.entry_count = 0
+        self.bars_with_candidate = 0
         self._logged_diagnostics = False
 
     @property
@@ -73,9 +72,9 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"SIGNAL v1 PULLBACK | seed={self.seed} | trend>{self.trend_lookback}sma "
-            f"| pullback {self.min_pullback:.1%}-{self.max_pullback:.1%} "
-            f"| rvol<={self.rvol_ceiling}")
+        log(f"SIGNAL v3 SUSTAINED VOLUME | seed={self.seed} | "
+            f"{self.sustain_bars} consecutive bars >= {self.sustain_rvol_min}x "
+            f"baseline({self.vol_baseline_bars}) | price > {self.trend_lookback}sma")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -84,39 +83,34 @@ class TradingStrategy(Strategy):
                 return float(row[ticker]["close"])
         return None
 
-    def _pullback_score(self, ticker, ohlcv):
-        """Returns pullback depth if the setup qualifies, else None."""
+    def _sustained_volume_score(self, ticker, ohlcv):
+        """Returns average sustained RVOL if it qualifies, else None."""
         rows = [bar[ticker] for bar in ohlcv if ticker in bar]
-        if len(rows) < self.trend_lookback + 5:
+        need = self.trend_lookback + self.sustain_bars + self.vol_baseline_bars + 5
+        if len(rows) < need:
             return None
 
         df = pd.DataFrame(rows)
-        current = float(df["close"].iloc[-1])
 
+        current = float(df["close"].iloc[-1])
         sma_trend = float(df["close"].tail(self.trend_lookback).mean())
         if current <= sma_trend:
             return None
 
-        if "high" in df.columns:
-            recent_high = float(df["high"].tail(self.high_lookback).max())
-        else:
-            recent_high = float(df["close"].tail(self.high_lookback).max())
+        vols = df["volume"].astype(float)
 
-        if recent_high <= 0:
+        window = vols.iloc[-self.sustain_bars:]
+        start = -(self.sustain_bars + self.vol_baseline_bars)
+        end = -self.sustain_bars
+        baseline = float(vols.iloc[start:end].mean())
+        if baseline <= 0:
             return None
 
-        pullback = (recent_high - current) / recent_high
-        if pullback < self.min_pullback or pullback > self.max_pullback:
+        rvols = [float(v) / baseline for v in window]
+        if min(rvols) < self.sustain_rvol_min:
             return None
 
-        avg_vol = float(df["volume"].tail(self.vol_lookback).mean())
-        if avg_vol <= 0:
-            return None
-        rvol = float(df["volume"].iloc[-1]) / avg_vol
-        if rvol > self.rvol_ceiling:
-            return None
-
-        return float(pullback)
+        return float(sum(rvols) / len(rvols))
 
     def run(self, data):
         ohlcv = data.get("ohlcv")
@@ -179,6 +173,7 @@ class TradingStrategy(Strategy):
                 pos["resynced"] = False
 
         # --- SIGNAL-DRIVEN ENTRY ---
+        saw_candidate = False
         while len(self.active_positions) < self.max_positions:
             active_clusters = {self.clusters[t] for t in self.active_positions}
 
@@ -188,15 +183,16 @@ class TradingStrategy(Strategy):
                     continue
                 if self.clusters[t] in active_clusters:
                     continue
-                score = self._pullback_score(t, ohlcv)
+                score = self._sustained_volume_score(t, ohlcv)
                 if score is not None:
                     candidates.append((t, score))
 
             if not candidates:
                 break
 
-            best_score = max(c[1] for c in candidates)
-            tied = [c[0] for c in candidates if abs(c[1] - best_score) < 1e-9]
+            saw_candidate = True
+            best = max(c[1] for c in candidates)
+            tied = [c[0] for c in candidates if abs(c[1] - best) < 1e-9]
             t = tied[0] if len(tied) == 1 else self.rng.choice(tied)
 
             price = self._latest_close(t, ohlcv)
@@ -216,13 +212,17 @@ class TradingStrategy(Strategy):
                 "weight": weight,
                 "resynced": False,
             }
-            self.qualify_count += 1
+            self.entry_count += 1
             state_changed = True
-            log(f"ENTRY: {t} | weight {weight:.2%} | pullback {best_score:.2%} | cluster {self.clusters[t]}")
+            log(f"ENTRY: {t} | weight {weight:.2%} | sustvol {best:.2f} | cluster {self.clusters[t]}")
+
+        if saw_candidate:
+            self.bars_with_candidate += 1
 
         if self.bar_count % 4000 == 0:
-            log(f"[bar {self.bar_count}] signal entries so far: {self.qualify_count} "
-                f"| open positions: {len(self.active_positions)}")
+            log(f"[bar {self.bar_count}] entries {self.entry_count} "
+                f"| bars with a qualifying setup: {self.bars_with_candidate} "
+                f"| holding {len(self.active_positions)}")
 
         if state_changed:
             return TargetAllocation({t: float(p["weight"]) for t, p in self.active_positions.items()})
