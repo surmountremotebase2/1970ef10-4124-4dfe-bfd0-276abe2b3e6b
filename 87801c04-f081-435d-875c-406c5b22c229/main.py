@@ -5,8 +5,9 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    NULL TEST — seed 7. Trailing stop RESTORED (validated).
-    Run on 2022-07-31 to 2023-07-31. Target reference: 49.79% / 40.22% DD.
+    NULL TEST — seed 123. Final robustness confirmation.
+    Run on 2022-07-31 to 2023-07-31, slippage 0.
+    Prior results: seed 42 = 49.79% / 40.22% DD, seed 7 = 57.35% / 40.04% DD.
     """
 
     def __init__(self):
@@ -29,7 +30,7 @@ class TradingStrategy(Strategy):
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        self.seed = 7
+        self.seed = 123
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
