@@ -5,10 +5,8 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    NULL TEST — NO TRAILING STOP variant.
-    Random entry. Exits: 10% take profit, 12% hard stop, 96-bar time stop.
-    The 8% trailing stop has been removed entirely.
-    seed = 42
+    NULL TEST — seed 7. Trailing stop RESTORED (validated).
+    Run on 2022-07-31 to 2023-07-31. Target reference: 49.79% / 40.22% DD.
     """
 
     def __init__(self):
@@ -27,10 +25,11 @@ class TradingStrategy(Strategy):
         self.min_cash_buffer = 0.05
 
         self.take_profit_pct = 0.10
+        self.trailing_stop_pct = 0.08
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        self.seed = 42
+        self.seed = 7
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
@@ -49,8 +48,7 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self, data):
         if self._logged_diagnostics:
             return
-        log(f"NO-TRAILING-STOP TEST | seed={self.seed}")
-        log(f"DIAGNOSTIC: raw holdings = {data.get('holdings')}")
+        log(f"NULL TEST | seed={self.seed} | trailing stop ON")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -105,6 +103,8 @@ class TradingStrategy(Strategy):
                 exit_reason = "TAKE PROFIT"
             elif cp <= pos["entry_price"] * (1 - self.hard_stop_pct):
                 exit_reason = "HARD STOP"
+            elif cp <= pos["peak_price"] * (1 - self.trailing_stop_pct):
+                exit_reason = "TRAILING STOP"
             elif pos["bars_held"] >= self.max_hold_bars:
                 exit_reason = "TIME STOP (stalled trade)"
 
