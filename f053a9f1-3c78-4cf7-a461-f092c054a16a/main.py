@@ -6,7 +6,8 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    SIGNAL v3-TIGHT — 5 consecutive bars >= 1.5x baseline.
+    SIGNAL v3-NOTREND — 4 bars >= 1.3x baseline, NO 50-SMA requirement.
+    Isolates whether the trend filter helps or just removes entries.
     Run on 2022-07-31 to 2023-07-31, slippage 0. seed 42.
     """
 
@@ -24,9 +25,8 @@ class TradingStrategy(Strategy):
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        self.trend_lookback = 50
-        self.sustain_bars = 5
-        self.sustain_rvol_min = 1.5
+        self.sustain_bars = 4
+        self.sustain_rvol_min = 1.3
         self.vol_baseline_bars = 20
 
         self.seed = 42
@@ -50,8 +50,8 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"SIGNAL v3-TIGHT | seed={self.seed} | {self.sustain_bars} bars "
-            f">= {self.sustain_rvol_min}x baseline({self.vol_baseline_bars})")
+        log(f"SIGNAL v3-NOTREND | seed={self.seed} | {self.sustain_bars} bars "
+            f">= {self.sustain_rvol_min}x baseline | NO trend filter")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -62,16 +62,11 @@ class TradingStrategy(Strategy):
 
     def _sustained_volume_score(self, ticker, ohlcv):
         rows = [bar[ticker] for bar in ohlcv if ticker in bar]
-        need = self.trend_lookback + self.sustain_bars + self.vol_baseline_bars + 5
+        need = self.sustain_bars + self.vol_baseline_bars + 10
         if len(rows) < need:
             return None
 
         df = pd.DataFrame(rows)
-        current = float(df["close"].iloc[-1])
-        sma_trend = float(df["close"].tail(self.trend_lookback).mean())
-        if current <= sma_trend:
-            return None
-
         vols = df["volume"].astype(float)
         window = vols.iloc[-self.sustain_bars:]
         start = -(self.sustain_bars + self.vol_baseline_bars)
