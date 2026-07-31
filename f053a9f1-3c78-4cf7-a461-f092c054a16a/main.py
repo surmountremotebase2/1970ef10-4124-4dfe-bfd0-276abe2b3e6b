@@ -6,34 +6,14 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    SIGNAL v3 — SUSTAINED VOLUME (institutional accumulation detection).
-
-    The anti-fakeout premise: a single volume spike is a fakeout signature.
-    Real accumulation shows elevated volume SUSTAINED across many bars.
-
-    Entry requires BOTH:
-      1. price > own 50-bar SMA (trend intact)
-      2. EVERY one of the last 4 bars >= 1.3x baseline volume,
-         where baseline = mean volume of the 20 bars BEFORE that window
-         (prevents the surge from inflating its own comparison)
-
-    Ranked by average sustained RVOL. Seed breaks ties only.
-    Exits unchanged: 10% TP, 8% trailing, 12% hard, 96-bar time.
-
-    Random baseline to beat: mean ~75% (10.10 / 33.92 / 66.56 / 104.77 / 158.47).
-    Run on 2022-07-31 to 2023-07-31, slippage 0.
+    SIGNAL v3-LOOSE — 3 consecutive bars >= 1.15x baseline.
+    Run on 2022-07-31 to 2023-07-31, slippage 0. seed 42.
     """
 
     def __init__(self):
         self.tickers = ["TECL", "SOXL", "GDXU", "AGQ", "UCO"]
-
-        self.clusters = {
-            "TECL": "tech",
-            "SOXL": "tech",
-            "AGQ": "silver",
-            "GDXU": "gold",
-            "UCO": "energy",
-        }
+        self.clusters = {"TECL": "tech", "SOXL": "tech", "AGQ": "silver",
+                         "GDXU": "gold", "UCO": "energy"}
 
         self.max_positions = 3
         self.max_weight_per_position = 0.40
@@ -44,11 +24,10 @@ class TradingStrategy(Strategy):
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        # --- SUSTAINED VOLUME PARAMETERS ---
         self.trend_lookback = 50
-        self.sustain_bars = 4 # 20 minutes of continuous elevated volume
-        self.sustain_rvol_min = 1.3 # every bar in the window must clear this
-        self.vol_baseline_bars = 20 # baseline measured BEFORE the window
+        self.sustain_bars = 3
+        self.sustain_rvol_min = 1.15
+        self.vol_baseline_bars = 20
 
         self.seed = 42
         self.rng = random.Random(self.seed)
@@ -58,7 +37,6 @@ class TradingStrategy(Strategy):
         self.cooldown = {}
         self.bar_count = 0
         self.entry_count = 0
-        self.bars_with_candidate = 0
         self._logged_diagnostics = False
 
     @property
@@ -72,9 +50,8 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"SIGNAL v3 SUSTAINED VOLUME | seed={self.seed} | "
-            f"{self.sustain_bars} consecutive bars >= {self.sustain_rvol_min}x "
-            f"baseline({self.vol_baseline_bars}) | price > {self.trend_lookback}sma")
+        log(f"SIGNAL v3-LOOSE | seed={self.seed} | {self.sustain_bars} bars "
+            f">= {self.sustain_rvol_min}x baseline({self.vol_baseline_bars})")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -84,21 +61,18 @@ class TradingStrategy(Strategy):
         return None
 
     def _sustained_volume_score(self, ticker, ohlcv):
-        """Returns average sustained RVOL if it qualifies, else None."""
         rows = [bar[ticker] for bar in ohlcv if ticker in bar]
         need = self.trend_lookback + self.sustain_bars + self.vol_baseline_bars + 5
         if len(rows) < need:
             return None
 
         df = pd.DataFrame(rows)
-
         current = float(df["close"].iloc[-1])
         sma_trend = float(df["close"].tail(self.trend_lookback).mean())
         if current <= sma_trend:
             return None
 
         vols = df["volume"].astype(float)
-
         window = vols.iloc[-self.sustain_bars:]
         start = -(self.sustain_bars + self.vol_baseline_bars)
         end = -self.sustain_bars
@@ -134,12 +108,8 @@ class TradingStrategy(Strategy):
                 if cp:
                     log(f"RESYNC: {t} held but untracked — proxy entry {cp}.")
                     self.active_positions[t] = {
-                        "entry_price": cp,
-                        "peak_price": cp,
-                        "bars_held": 0,
-                        "weight": float(self.max_weight_per_position),
-                        "resynced": True,
-                    }
+                        "entry_price": cp, "peak_price": cp, "bars_held": 0,
+                        "weight": float(self.max_weight_per_position), "resynced": True}
                     state_changed = True
 
         for t in list(self.active_positions.keys()):
@@ -172,11 +142,8 @@ class TradingStrategy(Strategy):
             elif pos.get("resynced"):
                 pos["resynced"] = False
 
-        # --- SIGNAL-DRIVEN ENTRY ---
-        saw_candidate = False
         while len(self.active_positions) < self.max_positions:
             active_clusters = {self.clusters[t] for t in self.active_positions}
-
             candidates = []
             for t in self.tickers:
                 if t in self.active_positions or t in self.cooldown:
@@ -190,7 +157,6 @@ class TradingStrategy(Strategy):
             if not candidates:
                 break
 
-            saw_candidate = True
             best = max(c[1] for c in candidates)
             tied = [c[0] for c in candidates if abs(c[1] - best) < 1e-9]
             t = tied[0] if len(tied) == 1 else self.rng.choice(tied)
@@ -206,23 +172,14 @@ class TradingStrategy(Strategy):
                 break
 
             self.active_positions[t] = {
-                "entry_price": float(price),
-                "peak_price": float(price),
-                "bars_held": 0,
-                "weight": weight,
-                "resynced": False,
-            }
+                "entry_price": float(price), "peak_price": float(price),
+                "bars_held": 0, "weight": weight, "resynced": False}
             self.entry_count += 1
             state_changed = True
             log(f"ENTRY: {t} | weight {weight:.2%} | sustvol {best:.2f} | cluster {self.clusters[t]}")
 
-        if saw_candidate:
-            self.bars_with_candidate += 1
-
         if self.bar_count % 4000 == 0:
-            log(f"[bar {self.bar_count}] entries {self.entry_count} "
-                f"| bars with a qualifying setup: {self.bars_with_candidate} "
-                f"| holding {len(self.active_positions)}")
+            log(f"[bar {self.bar_count}] entries {self.entry_count} | holding {len(self.active_positions)}")
 
         if state_changed:
             return TargetAllocation({t: float(p["weight"]) for t, p in self.active_positions.items()})
