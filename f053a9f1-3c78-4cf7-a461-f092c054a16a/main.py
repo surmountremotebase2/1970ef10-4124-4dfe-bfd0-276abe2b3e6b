@@ -5,11 +5,11 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    BASELINE v2 — random entry, 4-cluster map. SEED 123.
+    BASELINE v2 — random entry, 4-cluster map. SEED 999.
     tech (TECL/SOXL mutually exclusive), silver (AGQ), gold (GDXU), energy (UCO).
     Validated exits: 10% TP, 8% trailing, 12% hard, 96-bar time stop.
     Run on 2022-07-31 to 2023-07-31, slippage 0.
-    Prior on this structure: seed 42 = 104.77% / 41.71% DD, seed 7 = 33.92% / 47.45% DD.
+    Prior: seed 42 = 104.77%, seed 7 = 33.92%, seed 123 = 66.56%.
     """
 
     def __init__(self):
@@ -32,7 +32,7 @@ class TradingStrategy(Strategy):
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        self.seed = 123
+        self.seed = 999
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
