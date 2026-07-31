@@ -6,7 +6,7 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    SIGNAL v3-LOOSE — 3 consecutive bars >= 1.15x baseline.
+    SIGNAL v3-TIGHT — 5 consecutive bars >= 1.5x baseline.
     Run on 2022-07-31 to 2023-07-31, slippage 0. seed 42.
     """
 
@@ -25,8 +25,8 @@ class TradingStrategy(Strategy):
         self.max_hold_bars = 96
 
         self.trend_lookback = 50
-        self.sustain_bars = 3
-        self.sustain_rvol_min = 1.15
+        self.sustain_bars = 5
+        self.sustain_rvol_min = 1.5
         self.vol_baseline_bars = 20
 
         self.seed = 42
@@ -50,7 +50,7 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"SIGNAL v3-LOOSE | seed={self.seed} | {self.sustain_bars} bars "
+        log(f"SIGNAL v3-TIGHT | seed={self.seed} | {self.sustain_bars} bars "
             f">= {self.sustain_rvol_min}x baseline({self.vol_baseline_bars})")
         self._logged_diagnostics = True
 
