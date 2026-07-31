@@ -1,16 +1,27 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
+import pandas as pd
 import random
 
 
 class TradingStrategy(Strategy):
     """
-    BASELINE v2 — random entry, 4-cluster map. SEED 2024.
-    Fifth and final baseline point before entry-signal work.
-    tech (TECL/SOXL mutually exclusive), silver (AGQ), gold (GDXU), energy (UCO).
-    Validated exits: 10% TP, 8% trailing, 12% hard, 96-bar time stop.
+    SIGNAL v1 — PULLBACK-IN-UPTREND entry.
+    Inverse of the original RVOL-spike logic: buy the dip inside an intact
+    trend, on CALM volume, rather than buying the volume explosion.
+
+    Entry requires ALL of:
+      1. price > 50-bar SMA (trend intact)
+      2. pulled back 1.5%-6% from the 24-bar high (not buying the top)
+      3. RVOL <= 1.5 (calm, not a climax bar)
+    Ranked by pullback depth — deepest qualifying dip wins the slot.
+
+    Exits unchanged and validated: 10% TP, 8% trailing, 12% hard, 96-bar time.
+    Clusters unchanged: tech (TECL/SOXL exclusive), silver, gold, energy.
+
+    Seed now only breaks ties. If the signal is real, seeds should converge.
+    Random baseline to beat (same window): 10.10 / 33.92 / 66.56 / 104.77 / 158.47, mean ~75%.
     Run on 2022-07-31 to 2023-07-31, slippage 0.
-    Prior: 42 = 104.77%, 123 = 66.56%, 7 = 33.92%, 999 = 10.10%.
     """
 
     def __init__(self):
@@ -33,12 +44,22 @@ class TradingStrategy(Strategy):
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        self.seed = 2024
+        # --- SIGNAL PARAMETERS ---
+        self.trend_lookback = 50
+        self.high_lookback = 24
+        self.min_pullback = 0.015
+        self.max_pullback = 0.06
+        self.rvol_ceiling = 1.5
+        self.vol_lookback = 20
+
+        self.seed = 42
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
         self.active_positions = {}
         self.cooldown = {}
+        self.bar_count = 0
+        self.qualify_count = 0
         self._logged_diagnostics = False
 
     @property
@@ -52,7 +73,9 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"BASELINE v2 | seed={self.seed} | 4-cluster map | no forced sector")
+        log(f"SIGNAL v1 PULLBACK | seed={self.seed} | trend>{self.trend_lookback}sma "
+            f"| pullback {self.min_pullback:.1%}-{self.max_pullback:.1%} "
+            f"| rvol<={self.rvol_ceiling}")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -61,12 +84,47 @@ class TradingStrategy(Strategy):
                 return float(row[ticker]["close"])
         return None
 
+    def _pullback_score(self, ticker, ohlcv):
+        """Returns pullback depth if the setup qualifies, else None."""
+        rows = [bar[ticker] for bar in ohlcv if ticker in bar]
+        if len(rows) < self.trend_lookback + 5:
+            return None
+
+        df = pd.DataFrame(rows)
+        current = float(df["close"].iloc[-1])
+
+        sma_trend = float(df["close"].tail(self.trend_lookback).mean())
+        if current <= sma_trend:
+            return None
+
+        if "high" in df.columns:
+            recent_high = float(df["high"].tail(self.high_lookback).max())
+        else:
+            recent_high = float(df["close"].tail(self.high_lookback).max())
+
+        if recent_high <= 0:
+            return None
+
+        pullback = (recent_high - current) / recent_high
+        if pullback < self.min_pullback or pullback > self.max_pullback:
+            return None
+
+        avg_vol = float(df["volume"].tail(self.vol_lookback).mean())
+        if avg_vol <= 0:
+            return None
+        rvol = float(df["volume"].iloc[-1]) / avg_vol
+        if rvol > self.rvol_ceiling:
+            return None
+
+        return float(pullback)
+
     def run(self, data):
         ohlcv = data.get("ohlcv")
         if not ohlcv:
             return None
 
         self._log_diagnostics_once()
+        self.bar_count += 1
         holdings = data.get("holdings", {}) or {}
         state_changed = False
 
@@ -120,20 +178,30 @@ class TradingStrategy(Strategy):
             elif pos.get("resynced"):
                 pos["resynced"] = False
 
+        # --- SIGNAL-DRIVEN ENTRY ---
         while len(self.active_positions) < self.max_positions:
             active_clusters = {self.clusters[t] for t in self.active_positions}
-            eligible = [
-                t for t in self.tickers
-                if t not in self.active_positions
-                and t not in self.cooldown
-                and self.clusters[t] not in active_clusters
-                and self._latest_close(t, ohlcv) is not None
-            ]
-            if not eligible:
+
+            candidates = []
+            for t in self.tickers:
+                if t in self.active_positions or t in self.cooldown:
+                    continue
+                if self.clusters[t] in active_clusters:
+                    continue
+                score = self._pullback_score(t, ohlcv)
+                if score is not None:
+                    candidates.append((t, score))
+
+            if not candidates:
                 break
 
-            t = self.rng.choice(eligible)
+            best_score = max(c[1] for c in candidates)
+            tied = [c[0] for c in candidates if abs(c[1] - best_score) < 1e-9]
+            t = tied[0] if len(tied) == 1 else self.rng.choice(tied)
+
             price = self._latest_close(t, ohlcv)
+            if price is None:
+                break
 
             used = sum(p["weight"] for p in self.active_positions.values())
             remaining = 1.0 - self.min_cash_buffer - used
@@ -148,8 +216,13 @@ class TradingStrategy(Strategy):
                 "weight": weight,
                 "resynced": False,
             }
+            self.qualify_count += 1
             state_changed = True
-            log(f"ENTRY: {t} | weight {weight:.2%} | cluster {self.clusters[t]}")
+            log(f"ENTRY: {t} | weight {weight:.2%} | pullback {best_score:.2%} | cluster {self.clusters[t]}")
+
+        if self.bar_count % 4000 == 0:
+            log(f"[bar {self.bar_count}] signal entries so far: {self.qualify_count} "
+                f"| open positions: {len(self.active_positions)}")
 
         if state_changed:
             return TargetAllocation({t: float(p["weight"]) for t, p in self.active_positions.items()})
