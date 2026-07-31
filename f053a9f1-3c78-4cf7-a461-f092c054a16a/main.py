@@ -1,14 +1,13 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
-import pandas as pd
 import random
 
 
 class TradingStrategy(Strategy):
     """
-    SIGNAL v3-NOTREND — 4 bars >= 1.3x baseline, NO 50-SMA requirement.
-    Isolates whether the trend filter helps or just removes entries.
-    Run on 2022-07-31 to 2023-07-31, slippage 0. seed 42.
+    TIME STOP SWEEP — 48 bars. Random entry, 4-cluster map, seed 42.
+    Control (96 bars): 104.77% return, 41.71% DD.
+    Run on 2022-07-31 to 2023-07-31, slippage 0.
     """
 
     def __init__(self):
@@ -23,11 +22,7 @@ class TradingStrategy(Strategy):
         self.take_profit_pct = 0.10
         self.trailing_stop_pct = 0.08
         self.hard_stop_pct = 0.12
-        self.max_hold_bars = 96
-
-        self.sustain_bars = 4
-        self.sustain_rvol_min = 1.3
-        self.vol_baseline_bars = 20
+        self.max_hold_bars = 48
 
         self.seed = 42
         self.rng = random.Random(self.seed)
@@ -35,8 +30,6 @@ class TradingStrategy(Strategy):
 
         self.active_positions = {}
         self.cooldown = {}
-        self.bar_count = 0
-        self.entry_count = 0
         self._logged_diagnostics = False
 
     @property
@@ -50,8 +43,7 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"SIGNAL v3-NOTREND | seed={self.seed} | {self.sustain_bars} bars "
-            f">= {self.sustain_rvol_min}x baseline | NO trend filter")
+        log(f"TIME STOP SWEEP | seed={self.seed} | max_hold_bars={self.max_hold_bars}")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -60,34 +52,12 @@ class TradingStrategy(Strategy):
                 return float(row[ticker]["close"])
         return None
 
-    def _sustained_volume_score(self, ticker, ohlcv):
-        rows = [bar[ticker] for bar in ohlcv if ticker in bar]
-        need = self.sustain_bars + self.vol_baseline_bars + 10
-        if len(rows) < need:
-            return None
-
-        df = pd.DataFrame(rows)
-        vols = df["volume"].astype(float)
-        window = vols.iloc[-self.sustain_bars:]
-        start = -(self.sustain_bars + self.vol_baseline_bars)
-        end = -self.sustain_bars
-        baseline = float(vols.iloc[start:end].mean())
-        if baseline <= 0:
-            return None
-
-        rvols = [float(v) / baseline for v in window]
-        if min(rvols) < self.sustain_rvol_min:
-            return None
-
-        return float(sum(rvols) / len(rvols))
-
     def run(self, data):
         ohlcv = data.get("ohlcv")
         if not ohlcv:
             return None
 
         self._log_diagnostics_once()
-        self.bar_count += 1
         holdings = data.get("holdings", {}) or {}
         state_changed = False
 
@@ -139,26 +109,16 @@ class TradingStrategy(Strategy):
 
         while len(self.active_positions) < self.max_positions:
             active_clusters = {self.clusters[t] for t in self.active_positions}
-            candidates = []
-            for t in self.tickers:
-                if t in self.active_positions or t in self.cooldown:
-                    continue
-                if self.clusters[t] in active_clusters:
-                    continue
-                score = self._sustained_volume_score(t, ohlcv)
-                if score is not None:
-                    candidates.append((t, score))
-
-            if not candidates:
+            eligible = [t for t in self.tickers
+                        if t not in self.active_positions
+                        and t not in self.cooldown
+                        and self.clusters[t] not in active_clusters
+                        and self._latest_close(t, ohlcv) is not None]
+            if not eligible:
                 break
 
-            best = max(c[1] for c in candidates)
-            tied = [c[0] for c in candidates if abs(c[1] - best) < 1e-9]
-            t = tied[0] if len(tied) == 1 else self.rng.choice(tied)
-
+            t = self.rng.choice(eligible)
             price = self._latest_close(t, ohlcv)
-            if price is None:
-                break
 
             used = sum(p["weight"] for p in self.active_positions.values())
             remaining = 1.0 - self.min_cash_buffer - used
@@ -169,12 +129,8 @@ class TradingStrategy(Strategy):
             self.active_positions[t] = {
                 "entry_price": float(price), "peak_price": float(price),
                 "bars_held": 0, "weight": weight, "resynced": False}
-            self.entry_count += 1
             state_changed = True
-            log(f"ENTRY: {t} | weight {weight:.2%} | sustvol {best:.2f} | cluster {self.clusters[t]}")
-
-        if self.bar_count % 4000 == 0:
-            log(f"[bar {self.bar_count}] entries {self.entry_count} | holding {len(self.active_positions)}")
+            log(f"ENTRY: {t} | weight {weight:.2%} | cluster {self.clusters[t]}")
 
         if state_changed:
             return TargetAllocation({t: float(p["weight"]) for t, p in self.active_positions.items()})
