@@ -5,32 +5,27 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    NULL TEST — seed 123. Final robustness confirmation.
+    COUPLING TEST A — 96 bars, 12% trailing stop, 12% hard stop.
+    Control (96 bars @ 8% trailing): 104.77% return, 41.71% DD.
+    Random entry, 4-cluster map, seed 42.
     Run on 2022-07-31 to 2023-07-31, slippage 0.
-    Prior results: seed 42 = 49.79% / 40.22% DD, seed 7 = 57.35% / 40.04% DD.
     """
 
     def __init__(self):
-        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
-
-        self.clusters = {
-            "TECL": "tech",
-            "SOXL": "tech",
-            "GDXU": "metals",
-            "AGQ": "metals",
-            "UCO": "energy",
-        }
+        self.tickers = ["TECL", "SOXL", "GDXU", "AGQ", "UCO"]
+        self.clusters = {"TECL": "tech", "SOXL": "tech", "AGQ": "silver",
+                         "GDXU": "gold", "UCO": "energy"}
 
         self.max_positions = 3
         self.max_weight_per_position = 0.40
         self.min_cash_buffer = 0.05
 
         self.take_profit_pct = 0.10
-        self.trailing_stop_pct = 0.08
+        self.trailing_stop_pct = 0.12
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 96
 
-        self.seed = 123
+        self.seed = 42
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
@@ -46,10 +41,11 @@ class TradingStrategy(Strategy):
     def assets(self):
         return self.tickers
 
-    def _log_diagnostics_once(self, data):
+    def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"NULL TEST | seed={self.seed} | trailing stop ON")
+        log(f"COUPLING A | seed={self.seed} | hold={self.max_hold_bars} "
+            f"| trail={self.trailing_stop_pct:.0%} | hard={self.hard_stop_pct:.0%}")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -63,7 +59,7 @@ class TradingStrategy(Strategy):
         if not ohlcv:
             return None
 
-        self._log_diagnostics_once(data)
+        self._log_diagnostics_once()
         holdings = data.get("holdings", {}) or {}
         state_changed = False
 
@@ -79,12 +75,8 @@ class TradingStrategy(Strategy):
                 if cp:
                     log(f"RESYNC: {t} held but untracked — proxy entry {cp}.")
                     self.active_positions[t] = {
-                        "entry_price": cp,
-                        "peak_price": cp,
-                        "bars_held": 0,
-                        "weight": float(self.max_weight_per_position),
-                        "resynced": True,
-                    }
+                        "entry_price": cp, "peak_price": cp, "bars_held": 0,
+                        "weight": float(self.max_weight_per_position), "resynced": True}
                     state_changed = True
 
         for t in list(self.active_positions.keys()):
@@ -119,13 +111,11 @@ class TradingStrategy(Strategy):
 
         while len(self.active_positions) < self.max_positions:
             active_clusters = {self.clusters[t] for t in self.active_positions}
-            eligible = [
-                t for t in self.tickers
-                if t not in self.active_positions
-                and t not in self.cooldown
-                and self.clusters[t] not in active_clusters
-                and self._latest_close(t, ohlcv) is not None
-            ]
+            eligible = [t for t in self.tickers
+                        if t not in self.active_positions
+                        and t not in self.cooldown
+                        and self.clusters[t] not in active_clusters
+                        and self._latest_close(t, ohlcv) is not None]
             if not eligible:
                 break
 
@@ -139,12 +129,8 @@ class TradingStrategy(Strategy):
                 break
 
             self.active_positions[t] = {
-                "entry_price": float(price),
-                "peak_price": float(price),
-                "bars_held": 0,
-                "weight": weight,
-                "resynced": False,
-            }
+                "entry_price": float(price), "peak_price": float(price),
+                "bars_held": 0, "weight": weight, "resynced": False}
             state_changed = True
             log(f"ENTRY: {t} | weight {weight:.2%} | cluster {self.clusters[t]}")
 
