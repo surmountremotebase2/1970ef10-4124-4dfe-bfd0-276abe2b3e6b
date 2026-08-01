@@ -5,9 +5,9 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    COUPLING TEST B — 192 bars, 12% trailing stop, 12% hard stop.
-    192 bars @ 8% trailing gave 36.29% with 36.6% of exits on trailing stops.
-    This tests whether a wider stop lets those trades reach the 10% target.
+    COUPLING TEST C — 96 bars, 6% trailing stop, 12% hard stop.
+    Tests the tighter direction so we get the shape of the trailing-stop curve
+    rather than assuming it. Control (96 @ 8%): 104.77% return, 41.71% DD.
     Random entry, 4-cluster map, seed 42.
     Run on 2022-07-31 to 2023-07-31, slippage 0.
     """
@@ -22,9 +22,9 @@ class TradingStrategy(Strategy):
         self.min_cash_buffer = 0.05
 
         self.take_profit_pct = 0.10
-        self.trailing_stop_pct = 0.12
+        self.trailing_stop_pct = 0.06
         self.hard_stop_pct = 0.12
-        self.max_hold_bars = 192
+        self.max_hold_bars = 96
 
         self.seed = 42
         self.rng = random.Random(self.seed)
@@ -45,7 +45,7 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"COUPLING B | seed={self.seed} | hold={self.max_hold_bars} "
+        log(f"COUPLING C | seed={self.seed} | hold={self.max_hold_bars} "
             f"| trail={self.trailing_stop_pct:.0%} | hard={self.hard_stop_pct:.0%}")
         self._logged_diagnostics = True
 
