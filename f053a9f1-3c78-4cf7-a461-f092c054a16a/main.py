@@ -5,7 +5,8 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    VALIDATION — 192 bars @ 12% trailing. SEED 123.
+    VALIDATION — 192 bars @ 12% trailing. SEED 999.
+    Note: seed 999 was the WORST random baseline draw (10.10% at 96@8%).
     Run on 2022-07-31 to 2023-07-31, slippage 0.
     """
 
@@ -23,7 +24,7 @@ class TradingStrategy(Strategy):
         self.hard_stop_pct = 0.12
         self.max_hold_bars = 192
 
-        self.seed = 123
+        self.seed = 999
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
