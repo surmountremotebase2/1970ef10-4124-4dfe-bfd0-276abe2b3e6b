@@ -5,9 +5,10 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    TIME STOP SWEEP — NO TIME STOP. Positions held until 10% TP,
-    8% trailing stop, or 12% hard stop fires. Random entry, seed 42.
-    Control (96 bars): 104.77% return, 41.71% DD.
+    COUPLING TEST B — 192 bars, 12% trailing stop, 12% hard stop.
+    192 bars @ 8% trailing gave 36.29% with 36.6% of exits on trailing stops.
+    This tests whether a wider stop lets those trades reach the 10% target.
+    Random entry, 4-cluster map, seed 42.
     Run on 2022-07-31 to 2023-07-31, slippage 0.
     """
 
@@ -21,8 +22,9 @@ class TradingStrategy(Strategy):
         self.min_cash_buffer = 0.05
 
         self.take_profit_pct = 0.10
-        self.trailing_stop_pct = 0.08
+        self.trailing_stop_pct = 0.12
         self.hard_stop_pct = 0.12
+        self.max_hold_bars = 192
 
         self.seed = 42
         self.rng = random.Random(self.seed)
@@ -43,7 +45,8 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"TIME STOP SWEEP | seed={self.seed} | NO TIME STOP")
+        log(f"COUPLING B | seed={self.seed} | hold={self.max_hold_bars} "
+            f"| trail={self.trailing_stop_pct:.0%} | hard={self.hard_stop_pct:.0%}")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
@@ -96,6 +99,8 @@ class TradingStrategy(Strategy):
                 exit_reason = "HARD STOP"
             elif cp <= pos["peak_price"] * (1 - self.trailing_stop_pct):
                 exit_reason = "TRAILING STOP"
+            elif pos["bars_held"] >= self.max_hold_bars:
+                exit_reason = "TIME STOP (stalled trade)"
 
             if exit_reason:
                 log(f"{exit_reason}: {t} exit at {cp} | entry {pos['entry_price']} | held {pos['bars_held']} bars")
