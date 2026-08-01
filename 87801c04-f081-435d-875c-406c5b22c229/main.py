@@ -5,9 +5,9 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    COUPLING TEST A — 96 bars, 12% trailing stop, 12% hard stop.
-    Control (96 bars @ 8% trailing): 104.77% return, 41.71% DD.
-    Random entry, 4-cluster map, seed 42.
+    VALIDATION — 192 bars @ 12% trailing. SEED 7.
+    Seed 42 gave 97.50% return, 33.47% DD, Calmar 2.89.
+    Random baseline (96@8%) five-seed mean: ~75%.
     Run on 2022-07-31 to 2023-07-31, slippage 0.
     """
 
@@ -23,9 +23,9 @@ class TradingStrategy(Strategy):
         self.take_profit_pct = 0.10
         self.trailing_stop_pct = 0.12
         self.hard_stop_pct = 0.12
-        self.max_hold_bars = 96
+        self.max_hold_bars = 192
 
-        self.seed = 42
+        self.seed = 7
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
@@ -44,8 +44,7 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"COUPLING A | seed={self.seed} | hold={self.max_hold_bars} "
-            f"| trail={self.trailing_stop_pct:.0%} | hard={self.hard_stop_pct:.0%}")
+        log(f"VALIDATION 192/12 | seed={self.seed}")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
