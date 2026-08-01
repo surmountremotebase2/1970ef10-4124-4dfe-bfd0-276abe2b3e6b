@@ -5,8 +5,7 @@ import random
 
 class TradingStrategy(Strategy):
     """
-    TIME STOP SWEEP — 48 bars. Random entry, 4-cluster map, seed 42.
-    Control (96 bars): 104.77% return, 41.71% DD.
+    VALIDATION — 192 bars @ 12% trailing. SEED 123.
     Run on 2022-07-31 to 2023-07-31, slippage 0.
     """
 
@@ -20,11 +19,11 @@ class TradingStrategy(Strategy):
         self.min_cash_buffer = 0.05
 
         self.take_profit_pct = 0.10
-        self.trailing_stop_pct = 0.08
+        self.trailing_stop_pct = 0.12
         self.hard_stop_pct = 0.12
-        self.max_hold_bars = 48
+        self.max_hold_bars = 192
 
-        self.seed = 42
+        self.seed = 123
         self.rng = random.Random(self.seed)
         self.exit_cooldown_bars = 3
 
@@ -43,7 +42,7 @@ class TradingStrategy(Strategy):
     def _log_diagnostics_once(self):
         if self._logged_diagnostics:
             return
-        log(f"TIME STOP SWEEP | seed={self.seed} | max_hold_bars={self.max_hold_bars}")
+        log(f"VALIDATION 192/12 | seed={self.seed}")
         self._logged_diagnostics = True
 
     def _latest_close(self, ticker, ohlcv):
