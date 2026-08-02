@@ -94,13 +94,13 @@ class TradingStrategy(Strategy):
         if vwap_bullish and macd_bullish and rvol >= self.rvol_threshold:
             realized_vol = df["close"].pct_change().tail(self.vol_lookback).std()
             if realized_vol and realized_vol > 0:
-                return rvol, realized_vol
+                return float(rvol), float(realized_vol)
         return 0, None
 
     def _latest_close(self, ticker, ohlcv):
         for row in reversed(ohlcv):
             if ticker in row:
-                return row[ticker]["close"]
+                return float(row[ticker]["close"])
         return None
 
     def run(self, data):
@@ -121,7 +121,7 @@ class TradingStrategy(Strategy):
                         "entry_price": cp,
                         "peak_price": cp,
                         "bars_held": 0,
-                        "weight": self.max_weight_per_position,
+                        "weight": float(self.max_weight_per_position),
                         "resynced": True,
                     }
 
@@ -180,12 +180,12 @@ class TradingStrategy(Strategy):
                     if remaining_capacity <= 0.01 or total_inv_vol <= 0:
                         break
                     raw_weight = (inv_vol[t] / total_inv_vol) * remaining_capacity
-                    weight = min(raw_weight, self.max_weight_per_position, remaining_capacity)
+                    weight = float(min(raw_weight, self.max_weight_per_position, remaining_capacity))
                     if weight < 0.05:
                         continue
                     self.active_positions[t] = {
-                        "entry_price": price,
-                        "peak_price": price,
+                        "entry_price": float(price),
+                        "peak_price": float(price),
                         "bars_held": 0,
                         "weight": weight,
                         "resynced": False,
@@ -194,5 +194,5 @@ class TradingStrategy(Strategy):
                     remaining_capacity -= weight
                     log(f"ENTRY: {t} | weight {weight:.2%} | RVOL {score:.2f} | cluster {self.clusters[t]}")
 
-        allocation = {t: pos["weight"] for t, pos in self.active_positions.items()}
+        allocation = {t: float(pos["weight"]) for t, pos in self.active_positions.items()}
         return TargetAllocation(allocation)
