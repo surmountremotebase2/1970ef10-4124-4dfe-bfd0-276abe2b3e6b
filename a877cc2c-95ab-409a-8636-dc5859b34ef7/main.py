@@ -14,7 +14,7 @@ class TradingStrategy(Strategy):
         self.vwap_len = 12
         self.rvol_threshold = 1.8
         self.trailing_stop_pct = 0.08
-        self.take_profit_pct = 0.10
+        self.take_profit_pct = 0.25
        
         # Upgraded Internal Memory Tracker
         # Format: {"TICKER": {"entry_price": X, "peak_price": Y, "weight": W}}
@@ -73,20 +73,29 @@ class TradingStrategy(Strategy):
        
         holdings = data.get("holdings", {})
        
-        # --- AMNESIA RECOVERY CIRCUIT BREAKER (Dual-Bullet Upgraded) ---
-        if holdings:
-            for t in self.tickers:
-                if holdings.get(t, 0) > 0 and t not in self.active_positions:
-                    if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
-                        # Re-sync a missing live position
-                        cp = d[-1][t]["close"] if t in d[-1] else 0
-                        recovered_w = self._observed_weight(t, holdings)
-                        self.active_positions[t] = {
-                            "entry_price": cp,
-                            "peak_price": cp,
-                            "weight": recovered_w if recovered_w is not None else self.allocation_size,
-                        }
-                        log(f"AMNESIA RECOVERY: Resynced live position for {t}")
+        # --- AMNESIA RECOVERY CIRCUIT BREAKER -- DISABLED FOR THIS TEST ---
+        # Fired 41 times over the 3-year window. Each firing re-adopted a
+        # position at the CURRENT price with a fresh entry price and a fresh
+        # peak, which restarts the take-profit and trailing-stop clocks and
+        # effectively gives a winner a second life. That is a side effect of
+        # working around settlement lag, not a trading decision.
+        #
+        # Disabled here to measure how much of the return it was producing.
+        # If results fall sharply, the mechanism was doing the work.
+        # To restore, simply uncomment the block below.
+        #
+        # if holdings:
+        #     for t in self.tickers:
+        #         if holdings.get(t, 0) > 0 and t not in self.active_positions:
+        #             if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
+        #                 cp = d[-1][t]["close"] if t in d[-1] else 0
+        #                 recovered_w = self._observed_weight(t, holdings)
+        #                 self.active_positions[t] = {
+        #                     "entry_price": cp,
+        #                     "peak_price": cp,
+        #                     "weight": recovered_w if recovered_w is not None else self.allocation_size,
+        #                 }
+        #                 log(f"AMNESIA RECOVERY: Resynced live position for {t}")
 
         # Clear the lag circuit breaker at the start of a new bar
         self.exited_tickers = []
@@ -111,7 +120,7 @@ class TradingStrategy(Strategy):
             if cp > metrics["peak_price"]:
                 self.active_positions[t]["peak_price"] = cp
            
-            # OFFENSIVE EXIT: 10% Target
+            # OFFENSIVE EXIT: 25% Target
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
@@ -155,11 +164,11 @@ class TradingStrategy(Strategy):
                 log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
 
         # --- 3. ALLOCATION EXECUTION (no forced rebalancing) ---
-        # THE FIX: only a NEW position is assigned allocation_size. Existing
-        # positions are submitted at the weight they have actually drifted to,
-        # so the platform sees no difference from the current holding and
-        # places no trade. Previously every position was reset to 0.50 on any
-        # state change, which sold down winners and topped up losers.
+        # Only a NEW position is assigned allocation_size. Existing positions
+        # are submitted at the weight they have actually drifted to, so the
+        # platform sees no difference from the current holding and places no
+        # trade. Previously every position was reset to 0.50 on any state
+        # change, which sold down winners and topped up losers.
         if state_changed:
             new_allocation = {}
             for t, metrics in self.active_positions.items():
