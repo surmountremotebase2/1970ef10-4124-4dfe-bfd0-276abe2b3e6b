@@ -20,6 +20,12 @@ class TradingStrategy(Strategy):
         # portfolio. This is what stops the forced rebalancing.
         self.active_positions = {}
 
+        # Bar index at which each ticker was last exited. Reconciliation
+        # ignores a ticker for a short window afterwards, because the
+        # broker's holdings do not clear on the same bar as the sell.
+        self.exit_bar = {}
+        self.settle_grace_bars = 12      # ~1 hour on 5-minute bars
+
     @property
     def interval(self): return "5min"
 
@@ -62,6 +68,8 @@ class TradingStrategy(Strategy):
         d = data.get("ohlcv")
         if not d: return None
 
+        bar_index = len(d)
+
         # --- PHASE 1: THE DATA SCRUBBER ---
         # Force uppercase so API casing cannot cause duplicate buys.
         raw_holdings = data.get("holdings", {})
@@ -71,13 +79,22 @@ class TradingStrategy(Strategy):
         newly_entered = set()
 
         # --- PHASE 2: RECONCILIATION ---
-        # If the broker reports a position the strategy has no record of, do
-        # NOT adopt it -- close it. An untracked leveraged position has no
-        # stop and no target protecting it. Because the allocation dict is
-        # built only from active_positions, anything untracked simply will
-        # not appear in it, and the platform closes it out.
+        # Close any position the strategy has no record of -- an untracked
+        # leveraged position has no stop and no target protecting it.
+        #
+        # The grace period matters: the broker's holdings lag a sell by
+        # several bars. Without it this fires every single bar on a position
+        # already sold, blocks re-entry through the Sieve, and churns the
+        # allocation endlessly (measured: 2,114 spurious reconciles against
+        # 134 real entries, which cut a +21% year down to +2.5%).
+        orphans = []
         for t in self.tickers:
             if holdings.get(t, 0) > 0.01 and t not in self.active_positions:
+                still_settling = (t in self.exit_bar
+                                  and bar_index - self.exit_bar[t] < self.settle_grace_bars)
+                if still_settling:
+                    continue
+                orphans.append(t)
                 log(f"RECONCILE: {t} held but untracked -- closing.")
                 state_changed = True
 
@@ -100,6 +117,7 @@ class TradingStrategy(Strategy):
             # OFFENSIVE EXIT: 10% Target
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
+                self.exit_bar[t] = bar_index
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -107,6 +125,7 @@ class TradingStrategy(Strategy):
             # DEFENSIVE EXIT: 8% Trailing Stop
             if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
                 log(f"SWING STOP: {t} exit at {cp}.")
+                self.exit_bar[t] = bar_index
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -162,6 +181,12 @@ class TradingStrategy(Strategy):
                         else:
                             target_value = min(cash, total_portfolio_value * self.allocation_size)
                             new_allocation[t] = target_value / total_portfolio_value
+
+                    # State the exit explicitly rather than by omission.
+                    for t in self.tickers:
+                        if t not in new_allocation and holdings.get(t, 0) > 0.01:
+                            new_allocation[t] = 0.0
+
                     log("ALLOC: " + ", ".join(f"{t} {w:.1%}" for t, w in new_allocation.items()))
                     return TargetAllocation(new_allocation)
 
@@ -182,6 +207,13 @@ class TradingStrategy(Strategy):
             if total > 1.0:
                 # Never submit more than 100% of capital.
                 new_allocation = {t: w / total for t, w in new_allocation.items()}
+
+            # Anything held but no longer tracked is explicitly set to zero.
+            # Omitting it may read as "no instruction" rather than "sell",
+            # which is what left positions stuck in the previous run.
+            for t in self.tickers:
+                if t not in new_allocation and holdings.get(t, 0) > 0.01:
+                    new_allocation[t] = 0.0
 
             log("ALLOC: " + ", ".join(f"{t} {w:.1%}" for t, w in new_allocation.items()))
             return TargetAllocation(new_allocation)
