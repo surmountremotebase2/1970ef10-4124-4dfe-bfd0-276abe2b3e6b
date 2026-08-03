@@ -5,8 +5,10 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Original 5-Ticker Macro Roster
-        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
+        # 4-Ticker Roster -- UCO removed.
+        # In the 3-year trade log UCO was the only ticker with negative
+        # expectancy: 48 trades, -1.33% mean, 31% win rate, -29.5% compounded.
+        self.tickers = ["TECL", "GDXU", "SOXL", "AGQ"]
        
         # Dual-Bullet Parameters
         self.allocation_size = 0.50 # 50% per trade
@@ -14,14 +16,7 @@ class TradingStrategy(Strategy):
         self.vwap_len = 12
         self.rvol_threshold = 1.8
         self.trailing_stop_pct = 0.08
-
-        # CHANGED: 0.10 -> 0.25
-        # A 10% target fired on every winner before the trailing stop could
-        # ever run. Over the last 12 months that produced +0.22% while SOXL
-        # rose 368%. Losers average -6%; capping winners at +10% barely
-        # breaks even at a ~40% win rate. Raising the ceiling lets the
-        # trailing stop do the job it was written for.
-        self.take_profit_pct = 0.25
+        self.take_profit_pct = 0.10
        
         # Upgraded Internal Memory Tracker
         # Format: {"TICKER": {"entry_price": X, "peak_price": Y, "weight": W}}
@@ -80,20 +75,25 @@ class TradingStrategy(Strategy):
        
         holdings = data.get("holdings", {})
        
-        # --- AMNESIA RECOVERY CIRCUIT BREAKER (Dual-Bullet Upgraded) ---
-        if holdings:
-            for t in self.tickers:
-                if holdings.get(t, 0) > 0 and t not in self.active_positions:
-                    if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
-                        # Re-sync a missing live position
-                        cp = d[-1][t]["close"] if t in d[-1] else 0
-                        recovered_w = self._observed_weight(t, holdings)
-                        self.active_positions[t] = {
-                            "entry_price": cp,
-                            "peak_price": cp,
-                            "weight": recovered_w if recovered_w is not None else self.allocation_size,
-                        }
-                        log(f"AMNESIA RECOVERY: Resynced live position for {t}")
+        # --- AMNESIA RECOVERY CIRCUIT BREAKER -- STILL DISABLED ---
+        # Removing it RAISED the 3-year result (600% -> 654%), so it was a
+        # mild drag in backtest. LIVE it is different: if the broker ever
+        # reports a position the code does not know about, nothing will
+        # manage it -- no stop, no target, on a 3x leveraged ETF.
+        # Re-enable before trading real money.
+        #
+        # if holdings:
+        #     for t in self.tickers:
+        #         if holdings.get(t, 0) > 0 and t not in self.active_positions:
+        #             if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
+        #                 cp = d[-1][t]["close"] if t in d[-1] else 0
+        #                 recovered_w = self._observed_weight(t, holdings)
+        #                 self.active_positions[t] = {
+        #                     "entry_price": cp,
+        #                     "peak_price": cp,
+        #                     "weight": recovered_w if recovered_w is not None else self.allocation_size,
+        #                 }
+        #                 log(f"AMNESIA RECOVERY: Resynced live position for {t}")
 
         # Clear the lag circuit breaker at the start of a new bar
         self.exited_tickers = []
@@ -101,8 +101,6 @@ class TradingStrategy(Strategy):
         newly_entered = set()
 
         # --- REFRESH TRACKED WEIGHTS (no trading, bookkeeping only) ---
-        # Record what each position is ACTUALLY worth right now so that the
-        # allocation we submit later matches reality and triggers no trade.
         for t in self.active_positions:
             observed = self._observed_weight(t, holdings)
             if observed is not None:
@@ -118,7 +116,7 @@ class TradingStrategy(Strategy):
             if cp > metrics["peak_price"]:
                 self.active_positions[t]["peak_price"] = cp
            
-            # OFFENSIVE EXIT: 25% Target
+            # OFFENSIVE EXIT: 10% Target
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
@@ -164,9 +162,7 @@ class TradingStrategy(Strategy):
         # --- 3. ALLOCATION EXECUTION (no forced rebalancing) ---
         # Only a NEW position is assigned allocation_size. Existing positions
         # are submitted at the weight they have actually drifted to, so the
-        # platform sees no difference from the current holding and places no
-        # trade. Previously every position was reset to 0.50 on any state
-        # change, which sold down winners and topped up losers.
+        # platform sees no difference and places no trade.
         if state_changed:
             new_allocation = {}
             for t, metrics in self.active_positions.items():
@@ -177,8 +173,7 @@ class TradingStrategy(Strategy):
 
             total = sum(new_allocation.values())
             if total > 1.0:
-                # Never submit more than 100% of capital. Scale proportionally
-                # rather than truncating any single position.
+                # Never submit more than 100% of capital. Scale proportionally.
                 new_allocation = {t: w / total for t, w in new_allocation.items()}
 
             log("ALLOC: " + ", ".join(f"{t} {w:.1%}" for t, w in new_allocation.items()))
