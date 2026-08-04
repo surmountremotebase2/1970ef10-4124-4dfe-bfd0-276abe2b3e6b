@@ -14,9 +14,7 @@ class TradingStrategy(Strategy):
         ended below $10k 25% of windows
         worst window    $10,000 -> $10
 
-    The 25% is not a warning, it is part of the product. If that trade
-    is unacceptable, use strategy_seed_v1.py instead: 5% loss rate and a
-    $6,168 worst case, costing 28% of the median.
+    The 25% is not a warning, it is part of the product.
 
     NO TREND GATE -- it works, but over 3 years it costs 28% of the
     median and 19 points of doubling probability. Over 15 years the gate
@@ -26,12 +24,15 @@ class TradingStrategy(Strategy):
     NO PROFIT TARGET -- fixed targets truncate the winners these funds
     depend on. Trailing beat fixed 12 of 12 folds; no-exit beat both.
     ONE TRADE -- so nothing is taxed until sold, then at long-term rates.
+
+    TICKER NOTE: set to UPRO for this run. TQQQ split 2:1 on 2025-11-20
+    and Surmount's price series is inconsistently adjusted across that
+    date, so TQQQ backtests there are unreliable. UPRO last split in
+    January 2022, well clear of the problem, which makes it a clean
+    check on whether the platform and the local harness agree.
     """
 
-    # TQQQ = 3x Nasdaq 100. Won the longest window tested (2010-2026).
-    # SOXL wins 2016-2026 but that is the AI/semiconductor boom, and it
-    # is a single-industry bet at -90.5% drawdown. TECL is the middle.
-    TICKER = "TQQQ"
+    TICKER = "UPRO"
 
     def __init__(self):
         self._peak = None
