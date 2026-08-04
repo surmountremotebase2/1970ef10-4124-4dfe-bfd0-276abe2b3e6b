@@ -1,84 +1,75 @@
-from surmount.base_class import Strategy, TargetAllocation
-from surmount.logging import log
+import pandas as pd
+import numpy as np
 
+# Strategy Parameters
+# Target and Stop structured to maintain an ~80% ratio (positive skew)
+PROFIT_TARGET_PCT = 0.20  # 20% upside target to allow multi-month secular runs
+ATR_STOP_MULTIPLIER = 25  # Scaled for daily ATR to act as a wide structural stop
+MACRO_SMA_PERIOD = 200    # Macro trend filter period
+FAST_MA_PERIOD = 12       # Trend entry fast moving average
+SLOW_MA_PERIOD = 26       # Trend entry slow moving average
 
-class TradingStrategy(Strategy):
-    """SEED 3-YEAR -- maximum expected money over a three-year horizon.
+def initialize(context):
+    # Set single asset universe
+    context.asset = symbol("TQQQ")
+    context.benchmark = symbol("QQQ")
+    
+    # Track state variables
+    context.in_position = False
+    context.entry_price = 0.0
+    context.highest_price = 0.0
 
-    Hold a 3x fund at 100%. No gate, no profit target, no volatility
-    sizing, no exits. Every omission is a measured result.
+def handle_data(context, data):
+    # Fetch historical daily data for TQQQ and QQQ (macro filter)
+    hist_tqqq = data.history(context.asset, ['close', 'high', 'low', 'atr'], 250, '1d')
+    hist_qqq = data.history(context.benchmark, ['close'], MACRO_SMA_PERIOD + 10, '1d')
+    
+    if len(hist_tqqq) < MACRO_SMA_PERIOD or len(hist_qqq) < MACRO_SMA_PERIOD:
+        return
 
-    Across every 3-year window 1999-2026 (synthetic 3x Nasdaq):
-        median          $10,000 -> $24,579
-        reached $20,000  55% of windows
-        ended below $10k 25% of windows
-        worst window    $10,000 -> $10
+    current_price = hist_tqqq['close'].iloc[-1]
+    current_atr = hist_tqqq['atr'].iloc[-1]
+    
+    # 1. Macro Regime Filter (The Defense)
+    # Check if the broader Nasdaq-100 (QQQ) is above its 200-day SMA
+    qqq_close = hist_qqq['close']
+    qqq_sma_200 = qqq_close.rolling(window=MACRO_SMA_PERIOD).mean().iloc[-1]
+    is_macro_bullish = qqq_close.iloc[-1] > qqq_sma_200
 
-    The 25% is not a warning, it is part of the product.
+    # 2. Intermediate Momentum Signal (The Entry)
+    # Fast vs Slow EMA crossing on daily bars to capture long-duration trends
+    close_prices = hist_tqqq['close']
+    fast_ema = close_prices.ewm(span=FAST_MA_PERIOD, adjust=False).mean()
+    slow_ema = close_prices.ewm(span=SLOW_MA_PERIOD, adjust=False).mean()
+    
+    momentum_bullish = fast_ema.iloc[-1] > slow_ema.iloc[-1] and fast_ema.iloc[-2] <= slow_ema.iloc[-2]
 
-    NO TREND GATE -- it works, but over 3 years it costs 28% of the
-    median and 19 points of doubling probability. Over 15 years the gate
-    is the right answer and this file is wrong.
-    NO VOL TARGET -- swept 0.30 to unbounded, average weight 96-100% at
-    every setting. It was doing nothing.
-    NO PROFIT TARGET -- fixed targets truncate the winners these funds
-    depend on. Trailing beat fixed 12 of 12 folds; no-exit beat both.
-    ONE TRADE -- so nothing is taxed until sold, then at long-term rates.
+    # 3. Exit and Risk Management Logic
+    if context.in_position:
+        # Update high-water mark for trailing stop calculation
+        if current_price > context.highest_price:
+            context.highest_price = current_price
+            
+        # Calculate dynamic ATR-scaled trailing stop threshold
+        dynamic_stop_distance = current_atr * ATR_STOP_MULTIPLIER
+        trailing_stop_price = context.highest_price - dynamic_stop_distance
+        profit_target_price = context.entry_price * (1.0 + PROFIT_TARGET_PCT)
+        
+        # Check Exit Triggers
+        hit_target = current_price >= profit_target_price
+        hit_stop = current_price <= trailing_stop_price
+        macro_breakdown = not is_macro_bullish  # Force exit if macro regime fails
 
-    TICKER NOTE: set to UPRO for this run. TQQQ split 2:1 on 2025-11-20
-    and Surmount's price series is inconsistently adjusted across that
-    date, so TQQQ backtests there are unreliable. UPRO last split in
-    January 2022, well clear of the problem, which makes it a clean
-    check on whether the platform and the local harness agree.
-    """
-
-    TICKER = "UPRO"
-
-    def __init__(self):
-        self._peak = None
-        self._last_milestone = 0
-        self._entered = False
-
-    @property
-    def interval(self):
-        return "1day"
-
-    @property
-    def assets(self):
-        return [self.TICKER]
-
-    def run(self, data):
-        ohlcv = data.get("ohlcv")
-        if not ohlcv:
-            return TargetAllocation({self.TICKER: 0.0})
-
-        closes = [b[self.TICKER]["close"] for b in ohlcv if self.TICKER in b]
-        if not closes:
-            return TargetAllocation({self.TICKER: 1.0 if self._entered else 0.0})
-
-        price = closes[-1]
-
-        if not self._entered:
-            log(f"ENTER {self.TICKER} at {price:,.2f} -- 100%, held, no exit "
-                f"conditions. Expected: 55% chance of doubling in 3 years, "
-                f"25% chance of ending down.")
-            self._entered = True
-            self._peak = price
-
-        # ---- reporting only. Nothing below changes the allocation. ----
-        if self._peak is None or price > self._peak:
-            self._peak = price
-            if self._last_milestone:
-                log(f"RECOVERED to a new high at {price:,.2f}")
-                self._last_milestone = 0
-        else:
-            drop = (price / self._peak - 1) * 100
-            milestone = int(abs(drop) // 10) * 10
-            if milestone > self._last_milestone:
-                self._last_milestone = milestone
-                log(f"DRAWDOWN {drop:.0f}% from peak {self._peak:,.2f} "
-                    f"(now {price:,.2f}). Holding -- this strategy has no "
-                    f"exit. For reference the worst 3-year window on record "
-                    f"reached -99.9%.")
-
-        return TargetAllocation({self.TICKER: 1.0})
+        if hit_target or hit_stop or macro_breakdown:
+            order_target_percent(context.asset, 0.0)
+            context.in_position = False
+            context.entry_price = 0.0
+            context.highest_price = 0.0
+            
+    else:
+        # Entry Trigger: Must have macro alignment AND intermediate momentum alignment
+        if is_macro_bullish and momentum_bullish:
+            order_target_percent(context.asset, 1.0)
+            context.in_position = True
+            context.entry_price = current_price
+            context.highest_price = current_price
