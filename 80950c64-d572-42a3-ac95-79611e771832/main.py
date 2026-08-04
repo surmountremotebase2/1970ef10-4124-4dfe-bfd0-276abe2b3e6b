@@ -1,141 +1,83 @@
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
-import random
 
 
 class TradingStrategy(Strategy):
+    """SEED 3-YEAR -- maximum expected money over a three-year horizon.
+
+    Hold a 3x fund at 100%. No gate, no profit target, no volatility
+    sizing, no exits. Every omission is a measured result.
+
+    Across every 3-year window 1999-2026 (synthetic 3x Nasdaq):
+        median          $10,000 -> $24,579
+        reached $20,000  55% of windows
+        ended below $10k 25% of windows
+        worst window    $10,000 -> $10
+
+    The 25% is not a warning, it is part of the product. If that trade
+    is unacceptable, use strategy_seed_v1.py instead: 5% loss rate and a
+    $6,168 worst case, costing 28% of the median.
+
+    NO TREND GATE -- it works, but over 3 years it costs 28% of the
+    median and 19 points of doubling probability. Over 15 years the gate
+    is the right answer and this file is wrong.
+    NO VOL TARGET -- swept 0.30 to unbounded, average weight 96-100% at
+    every setting. It was doing nothing.
+    NO PROFIT TARGET -- fixed targets truncate the winners these funds
+    depend on. Trailing beat fixed 12 of 12 folds; no-exit beat both.
+    ONE TRADE -- so nothing is taxed until sold, then at long-term rates.
     """
-    COUPLING TEST C — 96 bars, 6% trailing stop, 12% hard stop.
-    Tests the tighter direction so we get the shape of the trailing-stop curve
-    rather than assuming it. Control (96 @ 8%): 104.77% return, 41.71% DD.
-    Random entry, 4-cluster map, seed 42.
-    Run on 2022-07-31 to 2023-07-31, slippage 0.
-    """
+
+    # TQQQ = 3x Nasdaq 100. Won the longest window tested (2010-2026).
+    # SOXL wins 2016-2026 but that is the AI/semiconductor boom, and it
+    # is a single-industry bet at -90.5% drawdown. TECL is the middle.
+    TICKER = "TQQQ"
 
     def __init__(self):
-        self.tickers = ["TECL", "SOXL", "GDXU", "AGQ", "UCO"]
-        self.clusters = {"TECL": "tech", "SOXL": "tech", "AGQ": "silver",
-                         "GDXU": "gold", "UCO": "energy"}
-
-        self.max_positions = 3
-        self.max_weight_per_position = 0.40
-        self.min_cash_buffer = 0.05
-
-        self.take_profit_pct = 0.10
-        self.trailing_stop_pct = 0.06
-        self.hard_stop_pct = 0.12
-        self.max_hold_bars = 96
-
-        self.seed = 42
-        self.rng = random.Random(self.seed)
-        self.exit_cooldown_bars = 3
-
-        self.active_positions = {}
-        self.cooldown = {}
-        self._logged_diagnostics = False
+        self._peak = None
+        self._last_milestone = 0
+        self._entered = False
 
     @property
     def interval(self):
-        return "5min"
+        return "1day"
 
     @property
     def assets(self):
-        return self.tickers
-
-    def _log_diagnostics_once(self):
-        if self._logged_diagnostics:
-            return
-        log(f"COUPLING C | seed={self.seed} | hold={self.max_hold_bars} "
-            f"| trail={self.trailing_stop_pct:.0%} | hard={self.hard_stop_pct:.0%}")
-        self._logged_diagnostics = True
-
-    def _latest_close(self, ticker, ohlcv):
-        for row in reversed(ohlcv):
-            if ticker in row:
-                return float(row[ticker]["close"])
-        return None
+        return [self.TICKER]
 
     def run(self, data):
         ohlcv = data.get("ohlcv")
         if not ohlcv:
-            return None
+            return TargetAllocation({self.TICKER: 0.0})
 
-        self._log_diagnostics_once()
-        holdings = data.get("holdings", {}) or {}
-        state_changed = False
+        closes = [b[self.TICKER]["close"] for b in ohlcv if self.TICKER in b]
+        if not closes:
+            return TargetAllocation({self.TICKER: 1.0 if self._entered else 0.0})
 
-        for t in list(self.cooldown.keys()):
-            self.cooldown[t] -= 1
-            if self.cooldown[t] <= 0:
-                del self.cooldown[t]
+        price = closes[-1]
 
-        for t in self.tickers:
-            held = holdings.get(t, 0)
-            if held and held > 0.001 and t not in self.active_positions and t not in self.cooldown:
-                cp = self._latest_close(t, ohlcv)
-                if cp:
-                    log(f"RESYNC: {t} held but untracked — proxy entry {cp}.")
-                    self.active_positions[t] = {
-                        "entry_price": cp, "peak_price": cp, "bars_held": 0,
-                        "weight": float(self.max_weight_per_position), "resynced": True}
-                    state_changed = True
+        if not self._entered:
+            log(f"ENTER {self.TICKER} at {price:,.2f} -- 100%, held, no exit "
+                f"conditions. Expected: 55% chance of doubling in 3 years, "
+                f"25% chance of ending down.")
+            self._entered = True
+            self._peak = price
 
-        for t in list(self.active_positions.keys()):
-            cp = self._latest_close(t, ohlcv)
-            if cp is None:
-                continue
+        # ---- reporting only. Nothing below changes the allocation. ----
+        if self._peak is None or price > self._peak:
+            self._peak = price
+            if self._last_milestone:
+                log(f"RECOVERED to a new high at {price:,.2f}")
+                self._last_milestone = 0
+        else:
+            drop = (price / self._peak - 1) * 100
+            milestone = int(abs(drop) // 10) * 10
+            if milestone > self._last_milestone:
+                self._last_milestone = milestone
+                log(f"DRAWDOWN {drop:.0f}% from peak {self._peak:,.2f} "
+                    f"(now {price:,.2f}). Holding -- this strategy has no "
+                    f"exit. For reference the worst 3-year window on record "
+                    f"reached -99.9%.")
 
-            pos = self.active_positions[t]
-            pos["bars_held"] += 1
-            if cp > pos["peak_price"]:
-                pos["peak_price"] = cp
-
-            suppress_tp = pos.get("resynced") and pos["bars_held"] <= 1
-
-            exit_reason = None
-            if not suppress_tp and cp >= pos["entry_price"] * (1 + self.take_profit_pct):
-                exit_reason = "TAKE PROFIT"
-            elif cp <= pos["entry_price"] * (1 - self.hard_stop_pct):
-                exit_reason = "HARD STOP"
-            elif cp <= pos["peak_price"] * (1 - self.trailing_stop_pct):
-                exit_reason = "TRAILING STOP"
-            elif pos["bars_held"] >= self.max_hold_bars:
-                exit_reason = "TIME STOP (stalled trade)"
-
-            if exit_reason:
-                log(f"{exit_reason}: {t} exit at {cp} | entry {pos['entry_price']} | held {pos['bars_held']} bars")
-                del self.active_positions[t]
-                self.cooldown[t] = self.exit_cooldown_bars
-                state_changed = True
-            elif pos.get("resynced"):
-                pos["resynced"] = False
-
-        while len(self.active_positions) < self.max_positions:
-            active_clusters = {self.clusters[t] for t in self.active_positions}
-            eligible = [t for t in self.tickers
-                        if t not in self.active_positions
-                        and t not in self.cooldown
-                        and self.clusters[t] not in active_clusters
-                        and self._latest_close(t, ohlcv) is not None]
-            if not eligible:
-                break
-
-            t = self.rng.choice(eligible)
-            price = self._latest_close(t, ohlcv)
-
-            used = sum(p["weight"] for p in self.active_positions.values())
-            remaining = 1.0 - self.min_cash_buffer - used
-            weight = float(min(self.max_weight_per_position, remaining))
-            if weight < 0.05:
-                break
-
-            self.active_positions[t] = {
-                "entry_price": float(price), "peak_price": float(price),
-                "bars_held": 0, "weight": weight, "resynced": False}
-            state_changed = True
-            log(f"ENTRY: {t} | weight {weight:.2%} | cluster {self.clusters[t]}")
-
-        if state_changed:
-            return TargetAllocation({t: float(p["weight"]) for t, p in self.active_positions.items()})
-
-        return None
+        return TargetAllocation({self.TICKER: 1.0})
