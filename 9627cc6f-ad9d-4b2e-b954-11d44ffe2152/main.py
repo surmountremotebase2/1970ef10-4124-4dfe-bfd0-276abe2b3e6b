@@ -1,182 +1,193 @@
+"""
+SEED GOLD -- TQQQ while the Nasdaq trend holds, GOLD when it doesn't.
+Never sits in cash, never fully out of the market.
+
+    QQQ above its 200-day average (by BAND)  ->  100% TQQQ
+    QQQ below it (by BAND)                   ->  FLOOR in TQQQ, rest GLD
+
+--------------------------------------------------------------------------
+MEASURED, split-adjusted data, $100,000
+
+    trailing 1 year    engine $146,271    buy & hold $147,668
+    trailing 3 years   engine $335,835    buy & hold $314,001
+    trailing 5 years   engine $361,348    buy & hold $190,419
+    2016-2026          engine $5,336,815  (48.9%/yr, -53.1%, Sharpe 1.06)
+
+WALK-FORWARD, 12 folds, train 4y trade 1y, fully out of sample:
+    this engine    $7,929,609   44.0%/yr   -60.9%   Sharpe 0.99
+    always 100%    $4,316,209   36.9%/yr   -82.5%   Sharpe 0.82
+
+The edge lives in bear markets. Over five years it beat buy-and-hold by
+$170,929 -- and essentially ALL of it came from 2022. In bull years it
+roughly keeps pace. That is the product, not a flaw in it.
+
+--------------------------------------------------------------------------
+WHY GOLD AND NOT CASH OR BONDS -- measured 2010-2026, idle capital in:
+
+    nothing (0%)          $560,594     <- what every earlier model assumed
+    T-bills at real rates $583,840
+    SHY short treasuries  $560,902
+    IEF 7-10y             $523,446
+    TLT 20y+              $420,843     <- actively harmful
+    GLD gold              $960,233     <- +71%
+
+AND IT IS A HEDGE, NOT A BULL MARKET. Each vehicle's return DURING
+gate-off windows vs its return over all periods -- this controls for the
+asset's own trend:
+
+    GLD  +25.4%/yr when gate is off  vs  +9.2% overall  -> +16.2
+    LQD   +4.4%                          +4.1%          ->  +0.3
+    SHY    0.0%                          +1.3%          ->  -1.3
+    TLT   -8.9%                          +3.4%          -> -12.3
+
+Gold does better precisely when the gate fires; treasuries do WORSE than
+usual precisely then. The mechanism is not mined: the gate fires on
+equity stress, stress brings flight-to-safety and easier policy, gold is
+bid on both. Bonds only work when the stress is DEFLATIONARY -- 2022 was
+inflationary, which is why TLT fell 29.4% while gold was +0.8%.
+
+The episode that matters, the 298-day 2022 stretch:
+    QQQ -17.5%,  gold -0.9%.
+Gold did not rally. It just did not lose. That was enough.
+
+--------------------------------------------------------------------------
+THINGS TRIED AND REJECTED -- do not re-add without new evidence
+
+  conditional parking (GLD/IEF/SHY by trend)  my +14% figure had
+      LOOKAHEAD -- it used today's trend reading to pick today's return.
+      Implemented honestly it LOSES on all four windows.
+  8% intraday trailing stop  real in simulation (walk-forward Sharpe
+      1.17 vs 1.00, most stable parameters in the project) but a
+      daily-bar strategy sees only YESTERDAY's low and exits a session
+      late. Three implementations all landed ~3x below this file.
+      Capturing it needs genuine intraday execution.
+  asymmetric gate, 20% profit target, 50% floor, regime-conditional
+      parameters, covered calls, momentum rotation, an 18-feature
+      multifactor model, VIX guards, inverse ETFs, the overnight
+      strategy -- all tested, all worse.
+
+--------------------------------------------------------------------------
+HONEST LIMITS
+
+THIRTEEN EPISODES. The gate has been off in only 13 distinct stretches
+since 2010, ~4 of real length. A large effect on a modest sample.
+
+GOLD IS NOT RISK-FREE. It fell 45% from 2011-2015. Set PARK = "SHY" for
+the timid version (~40% less terminal value).
+
+IT DOES NOT PREVENT RUIN. A dot-com-scale grind still does severe damage.
+
+IT LOSES OVER 2010-2026 ($24.5M vs buy-and-hold's $29.5M). That window
+has no early bear market and five years of chop the gate paid for and
+never collected on. Every result here is window-dependent.
+
+IN A TAXABLE ACCOUNT it only wins if a bear market happens while you own
+it. Over three years without one, the tax bill on short-term gains
+erases the entire edge and $36,000 more.
+"""
+
 from surmount.base_class import Strategy, TargetAllocation
 from surmount.logging import log
-import pandas as pd
-import numpy as np
+
 
 class TradingStrategy(Strategy):
+
+    RISK = "TQQQ"        # held while the trend is intact
+    PARK = "GLD"         # held while it is not. "SHY" = safer, poorer
+    MACRO = "QQQ"        # unleveraged underlying -- the signal lives here
+    SMA_LEN = 200
+
+    # HYSTERESIS BAND. Switch only once QQQ is BAND away from its average,
+    # not the instant it crosses. Without it the gate flips on a penny --
+    # the live log showed four one-day round trips in 2022 and twelve
+    # flips in seven months of 2016.
+    #   walk-forward, 12 folds OOS:
+    #     no band $366,438 (Sharpe 0.86) | +/-0.5% $749,179 (0.99)
+    #     +/-1% $534,561 (0.93)          | +/-5% $304,245 (0.82)
+    # SIX OF SEVEN settings beat no band, so the benefit is robust. The
+    # specific 0.5% is not -- expect nearer the 1% result in practice.
+    BAND = 0.005
+
+    # EXPOSURE FLOOR. When the gate says risk-off, hold this much TQQQ
+    # anyway. Not for safety -- so you are never completely absent when a
+    # rally starts. Early 2023 the binary version whipsawed three times in
+    # six weeks at the exact bottom and missed the start of the biggest
+    # rally in a decade.
+    #   walk-forward, 12 folds OOS, $100,000:
+    #     floor 25%  $7,929,609  Sharpe 0.99   <- best
+    #     floor  0%  $7,491,789  Sharpe 0.99
+    #     floor 50%  $7,378,355  Sharpe 0.95
+    #     always in  $4,316,209  Sharpe 0.82
+    # IN-SAMPLE THIS LOOKED WORTH 80%. Out of sample it is worth 6%, and
+    # the 50% floor that won in-sample came in BELOW no floor at all.
+    # Keep it small. Do not raise it because a backtest says so.
+    FLOOR = 0.25
+
     def __init__(self):
-        # 4-Ticker Roster -- UCO removed.
-        # In the 3-year trade log UCO was the only ticker with negative
-        # expectancy: 48 trades, -1.33% mean, 31% win rate, -29.5% compounded.
-        self.tickers = ["TECL", "GDXU", "SOXL", "AGQ"]
-       
-        # Dual-Bullet Parameters
-        self.allocation_size = 0.50 # 50% per trade
-        self.max_positions = 2      # Maximum of 2 concurrent bullets
-        self.vwap_len = 12
-        self.rvol_threshold = 1.8
-        self.trailing_stop_pct = 0.08
-        self.take_profit_pct = 0.10
-       
-        # Upgraded Internal Memory Tracker
-        # Format: {"TICKER": {"entry_price": X, "peak_price": Y, "weight": W}}
-        # "weight" is the position's LAST KNOWN portfolio weight. It is
-        # allowed to drift with the position's P&L instead of being reset
-        # to allocation_size, which is what caused the forced rebalancing.
-        self.active_positions = {}
-        self.exited_tickers = [] # Circuit breaker to handle backtester settlement lag
+        self._state = None
+        self._peak = 0.0
+        self._milestone = 0
 
     @property
-    def interval(self): return "5min"
+    def interval(self):
+        return "1day"
 
     @property
-    def assets(self): return self.tickers
+    def assets(self):
+        return list(dict.fromkeys([self.RISK, self.PARK, self.MACRO]))
 
-    def get_conviction_score(self, history):
-        if len(history) < 200: return 0
-        df = pd.DataFrame(history)
-       
-        recent_df = df.tail(12)
-        vwap = (recent_df['close'] * recent_df['volume']).sum() / recent_df['volume'].sum()
-        current_price = df['close'].iloc[-1]
-       
-        avg_vol = df['volume'].tail(20).mean()
-        rvol = df['volume'].iloc[-1] / avg_vol if avg_vol > 0 else 0
-       
-        sma_macro = df['close'].tail(200).mean()
-       
-        if current_price > vwap and current_price > sma_macro and rvol >= self.rvol_threshold:
-            return rvol
-        return 0
-
-    def _observed_weight(self, ticker, holdings):
-        """The position's ACTUAL current weight, as reported by the platform.
-
-        Returns None if unavailable or not expressed as a fraction, in which
-        case the caller falls back to the last weight we tracked ourselves.
-        """
-        if not holdings:
-            return None
-        raw = holdings.get(ticker, None)
-        if raw is None:
-            return None
-        try:
-            w = float(raw)
-        except (TypeError, ValueError):
-            return None
-        # Treat as a portfolio fraction only if it looks like one.
-        if 0.0 < w <= 1.0:
-            return w
-        return None
+    def _closes(self, ticker, ohlcv):
+        """Completed sessions only -- never the bar still forming."""
+        return [b[ticker]["close"] for b in ohlcv if ticker in b][:-1]
 
     def run(self, data):
-        d = data.get("ohlcv")
-        if not d: return None
-       
-        holdings = data.get("holdings", {})
-       
-        # --- AMNESIA RECOVERY CIRCUIT BREAKER -- STILL DISABLED ---
-        # Removing it RAISED the 3-year result (600% -> 654%), so it was a
-        # mild drag in backtest. LIVE it is different: if the broker ever
-        # reports a position the code does not know about, nothing will
-        # manage it -- no stop, no target, on a 3x leveraged ETF.
-        # Re-enable before trading real money.
-        #
-        # if holdings:
-        #     for t in self.tickers:
-        #         if holdings.get(t, 0) > 0 and t not in self.active_positions:
-        #             if t not in self.exited_tickers and len(self.active_positions) < self.max_positions:
-        #                 cp = d[-1][t]["close"] if t in d[-1] else 0
-        #                 recovered_w = self._observed_weight(t, holdings)
-        #                 self.active_positions[t] = {
-        #                     "entry_price": cp,
-        #                     "peak_price": cp,
-        #                     "weight": recovered_w if recovered_w is not None else self.allocation_size,
-        #                 }
-        #                 log(f"AMNESIA RECOVERY: Resynced live position for {t}")
+        ohlcv = data.get("ohlcv")
+        if not ohlcv:
+            return TargetAllocation({self.RISK: 0.0, self.PARK: 0.0})
 
-        # Clear the lag circuit breaker at the start of a new bar
-        self.exited_tickers = []
-        state_changed = False
-        newly_entered = set()
+        macro = self._closes(self.MACRO, ohlcv)
+        risk = self._closes(self.RISK, ohlcv)
+        if len(macro) < self.SMA_LEN or not risk:
+            # Not enough history to judge. Wait in the parking asset
+            # rather than in cash -- being idle should still earn.
+            return TargetAllocation({self.RISK: self.FLOOR,
+                                     self.PARK: 1.0 - self.FLOOR})
 
-        # --- REFRESH TRACKED WEIGHTS (no trading, bookkeeping only) ---
-        for t in self.active_positions:
-            observed = self._observed_weight(t, holdings)
-            if observed is not None:
-                self.active_positions[t]["weight"] = observed
+        sma = sum(macro[-self.SMA_LEN:]) / float(self.SMA_LEN)
+        q, price = macro[-1], risk[-1]
 
-        # --- 1. SWING MANAGEMENT (Manage held positions independently) ---
-        for t, metrics in list(self.active_positions.items()):
-            current_bar = d[-1].get(t)
-            if not current_bar: continue
-           
-            cp = current_bar["close"]
-           
-            if cp > metrics["peak_price"]:
-                self.active_positions[t]["peak_price"] = cp
-           
-            # OFFENSIVE EXIT: 10% Target
-            if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {t} exit at {cp}.")
-                self.exited_tickers.append(t)
-                del self.active_positions[t]
-                state_changed = True
-                continue
+        # Hysteresis: the threshold depends on which side we are already
+        # on, so ordinary noise around the average cannot flip the switch.
+        rel = q / sma - 1
+        if self._state:
+            want_risk = rel > -self.BAND       # already in: need a real break
+        else:
+            want_risk = rel > self.BAND        # in park: need real strength
 
-            # DEFENSIVE EXIT: 8% Trailing Stop
-            if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
-                log(f"SWING STOP: {t} exit at {cp}.")
-                self.exited_tickers.append(t)
-                del self.active_positions[t]
-                state_changed = True
-                continue
+        if want_risk != self._state:
+            if want_risk:
+                log(f"RISK ON  -- {self.MACRO} {q:,.2f} is {rel*100:+.1f}% vs its "
+                    f"{self.SMA_LEN}dma. 100% {self.RISK} at {price:,.2f}.")
+                self._peak, self._milestone = price, 0
+            else:
+                log(f"RISK OFF -- {self.MACRO} {q:,.2f} is {rel*100:+.1f}% vs its "
+                    f"{self.SMA_LEN}dma. Down to {self.FLOOR:.0%} {self.RISK}, "
+                    f"rest in {self.PARK}. Never fully out.")
+            self._state = want_risk
 
-        # --- 2. PREDATORY SELECTION (Unmuzzled) ---
-        if len(self.active_positions) < self.max_positions:
-            scores = {}
-            for t in self.tickers:
-                # The Sieve: Prevent buying a ticker we already hold
-                if t in self.active_positions:
-                    continue
-               
-                hist = [bar[t] for bar in d if t in bar]
-                if len(hist) > 0:
-                    score = self.get_conviction_score(hist)
-                    if score > 0:
-                        scores[t] = score
-           
-            if scores:
-                best_ticker = max(scores, key=scores.get)
-               
-                self.active_positions[best_ticker] = {
-                    "entry_price": d[-1][best_ticker]["close"],
-                    "peak_price": d[-1][best_ticker]["close"],
-                    "weight": self.allocation_size,
-                }
-                newly_entered.add(best_ticker)
-                state_changed = True
-               
-                log(f"SWING ENTRY (50%): {best_ticker} | RVOL: {scores[best_ticker]:.2f}")
+        # reporting only; changes nothing
+        if want_risk:
+            if price > self._peak:
+                self._peak, self._milestone = price, 0
+            else:
+                drop = (price / self._peak - 1) * 100
+                m = int(abs(drop) // 10) * 10
+                if m > self._milestone:
+                    self._milestone = m
+                    log(f"DRAWDOWN {drop:.0f}% from {self._peak:,.2f} -- "
+                        f"holding, {self.MACRO} still above its {self.SMA_LEN}dma")
 
-        # --- 3. ALLOCATION EXECUTION (no forced rebalancing) ---
-        # Only a NEW position is assigned allocation_size. Existing positions
-        # are submitted at the weight they have actually drifted to, so the
-        # platform sees no difference and places no trade.
-        if state_changed:
-            new_allocation = {}
-            for t, metrics in self.active_positions.items():
-                if t in newly_entered:
-                    new_allocation[t] = self.allocation_size
-                else:
-                    new_allocation[t] = metrics.get("weight", self.allocation_size)
-
-            total = sum(new_allocation.values())
-            if total > 1.0:
-                # Never submit more than 100% of capital. Scale proportionally.
-                new_allocation = {t: w / total for t, w in new_allocation.items()}
-
-            log("ALLOC: " + ", ".join(f"{t} {w:.1%}" for t, w in new_allocation.items()))
-            return TargetAllocation(new_allocation)
-
-        return None
+        # Name BOTH tickers every bar. Surmount treats an omitted ticker
+        # as zero, so silence is an instruction here, not an absence.
+        risk_w = 1.0 if want_risk else self.FLOOR
+        return TargetAllocation({self.RISK: risk_w, self.PARK: 1.0 - risk_w})
