@@ -5,8 +5,17 @@ import numpy as np
 
 class TradingStrategy(Strategy):
     def __init__(self):
-        # Original 5-Ticker Macro Roster
-        self.tickers = ["TECL", "GDXU", "SOXL", "UCO", "AGQ"]
+        # 4-Ticker Macro Roster. UCO REMOVED 2026-08-27.
+        # Measured across 219 real round trips over 3 years, priced
+        # against SIP data: UCO was the only negative contributor
+        # (-9.5%), had the worst win rate (32%), reached the +25%
+        # target least often (10% vs 18-24%), and held the longest
+        # (14.8 days vs 4-13). It consumed 31% of ALL position-time
+        # -- more than any other ticker -- at -0.016% per slot-day.
+        # With only two slots that is not neutral, it is blocking.
+        # It is also the only futures-based product here, so it pays
+        # contango roll decay the equity/metal funds do not.
+        self.tickers = ["TECL", "GDXU", "SOXL", "AGQ"]
 
         # Dual-Bullet Parameters
         self.allocation_size = 0.50 # 50% per trade
