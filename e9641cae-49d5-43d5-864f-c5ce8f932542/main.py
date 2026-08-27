@@ -13,8 +13,8 @@ class TradingStrategy(Strategy):
         self.max_positions = 2      # Maximum of 2 concurrent bullets
         self.vwap_len = 12
         self.rvol_threshold = 1.8
-        self.trailing_stop_pct = 0.08
-        self.take_profit_pct = 0.10 # CHANGED 2026-08-27: was 0.25, back to 0.10
+        self.trailing_stop_pct = 0.10 # CHANGED 2026-08-27: was 0.08
+        self.take_profit_pct = 0.25   # held at 0.25 -- the stop does ~88% of exits
 
         # Upgraded Internal Memory Tracker
         # Format: {"TICKER": {"entry_price": X, "peak_price": Y, "weight": W}}
@@ -120,7 +120,7 @@ class TradingStrategy(Strategy):
             if cp > metrics["peak_price"]:
                 self.active_positions[t]["peak_price"] = cp
 
-            # OFFENSIVE EXIT: 10% Target
+            # OFFENSIVE EXIT: 25% Target
             if cp >= metrics["entry_price"] * (1 + self.take_profit_pct):
                 log(f"TAKE PROFIT: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
@@ -128,7 +128,7 @@ class TradingStrategy(Strategy):
                 state_changed = True
                 continue
 
-            # DEFENSIVE EXIT: 8% Trailing Stop
+            # DEFENSIVE EXIT: 10% Trailing Stop
             if cp <= metrics["peak_price"] * (1 - self.trailing_stop_pct):
                 log(f"SWING STOP: {t} exit at {cp}.")
                 self.exited_tickers.append(t)
