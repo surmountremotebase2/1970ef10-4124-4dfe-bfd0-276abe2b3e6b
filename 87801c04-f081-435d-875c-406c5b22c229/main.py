@@ -7,13 +7,27 @@ import numpy as np
 class TradingStrategy(Strategy):
 
     def __init__(self):
-        self.tickers = ["TECL", "SOXL", "AGQ"]
+        self.tickers = ["TECL", "SOXL", "AGQ", "UCO"]
 
         self.allocation_size = 0.50   # per position
         self.max_positions = 2
         self.vwap_len = 12            # bars, = 1 hour
         self.rvol_threshold = 1.8
 
+        # --- EXITS, PER TICKER -------------------------------------
+        self.take_profits = {
+            "TECL": 0.25,
+            "SOXL": 0.25,
+            "AGQ":  0.25,
+            "UCO":  0.10,   # tested alone: both windows picked 10%
+        }
+        self.trailing_stops = {
+            "TECL": 0.12,
+            "SOXL": 0.12,
+            "AGQ":  0.12,
+            "UCO":  0.06,   # tested alone: both windows picked 6%
+        }
+        # fallback for any ticker missing from the dicts above
         self.take_profit_pct = 0.25
         self.trailing_stop_pct = 0.12
 
@@ -30,6 +44,12 @@ class TradingStrategy(Strategy):
     @property
     def assets(self):
         return self.tickers
+
+    def take_profit_for(self, ticker):
+        return self.take_profits.get(ticker, self.take_profit_pct)
+
+    def trailing_stop_for(self, ticker):
+        return self.trailing_stops.get(ticker, self.trailing_stop_pct)
 
     def get_conviction_score(self, history):
         if len(history) < 200:
@@ -92,17 +112,17 @@ class TradingStrategy(Strategy):
             if cp > m["peak_price"]:
                 self.active_positions[t]["peak_price"] = cp
 
-            # OFFENSIVE EXIT: 25% target
-            if cp >= m["entry_price"] * (1 + self.take_profit_pct):
-                log(f"TAKE PROFIT: {t} exit at {cp}.")
+            tp = self.take_profit_for(t)
+            if cp >= m["entry_price"] * (1 + tp):
+                log(f"TAKE PROFIT ({tp:.0%}): {t} exit at {cp}.")
                 self.exited_tickers.append(t)
                 del self.active_positions[t]
                 state_changed = True
                 continue
 
-            # DEFENSIVE EXIT: 12% trailing stop
-            if cp <= m["peak_price"] * (1 - self.trailing_stop_pct):
-                log(f"SWING STOP: {t} exit at {cp}.")
+            st = self.trailing_stop_for(t)
+            if cp <= m["peak_price"] * (1 - st):
+                log(f"SWING STOP ({st:.0%}): {t} exit at {cp}.")
                 self.exited_tickers.append(t)
                 del self.active_positions[t]
                 state_changed = True
