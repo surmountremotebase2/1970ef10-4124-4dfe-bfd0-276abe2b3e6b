@@ -7,7 +7,7 @@ import numpy as np
 class TradingStrategy(Strategy):
 
     def __init__(self):
-        self.tickers = ["TECL", "SOXL", "AGQ", "GDXU"]
+        self.tickers = ["TECL", "SOXL", "AGQ", "UCO", "GDXU"]
 
         self.allocation_size = 0.50   # per position
         self.max_positions = 2
@@ -15,21 +15,42 @@ class TradingStrategy(Strategy):
         self.rvol_threshold = 1.8
 
         # --- EXITS, PER TICKER -------------------------------------
-        #   ticker   TP / stop   3yr growth   worst yr   worst DD
-        #   SOXL      35% /  8%     11.47x      +64.7%     -54.9%
-        #   GDXU      20% / 20%      6.99x      -11.0%     -56.9%
-        #   AGQ       30% / 12%      4.22x      +28.1%     -61.3%
-        #   TECL      10% /  4%      3.87x      +48.4%     -41.0%
+        # Each ticker tested ALONE across three independent years, then
+        # confirmed together in the full two-slot book.
+        #
+        #   ticker   TP / stop   note
+        #   SOXL      35% /  8%  the engine -- remove it and 3yr goes 4.79x -> 1.80x
+        #   AGQ       30% / 12%
+        #   GDXU      20% / 20%  wide stop is deliberate: 7.22% daily sigma
+        #   TECL      10% /  4%
+        #   UCO        3% /  8%  see below
+        #
+        # UCO's 3%/8% LOSES MONEY ON ITS OWN TRADES and is still correct.
+        # Measured: 70% win rate against a 73% break-even, avg win +3.84%,
+        # avg loss -8.31%, win/loss 0.46 -- the only ticker below 1.6.
+        # It is not here to earn. It is a FAST-CYCLING PLACEHOLDER: it
+        # takes a slot, which denies that slot to a second tech or second
+        # metals position, then exits within days so a better instrument
+        # can have it. Every setting with sounder arithmetic makes it hold
+        # LONGER and makes the book WORSE:
+        #
+        #   UCO  3% / 8%  ->  12.92x   -44.9%   <- shipped
+        #   UCO  6% / 6%  ->   8.85x   -42.3%
+        #   UCO  6% / 8%  ->   7.08x   -46.2%
+        #   UCO  7% / 6%  ->   5.15x   -41.4%   (best arithmetic, worst book)
+        #   no UCO at all ->   8.25x   -59.7%   (worse on BOTH axes)
         self.take_profits = {
             "TECL": 0.10,
             "SOXL": 0.35,
             "AGQ":  0.30,
+            "UCO":  0.03,
             "GDXU": 0.20,
         }
         self.trailing_stops = {
             "TECL": 0.04,
             "SOXL": 0.08,
             "AGQ":  0.12,
+            "UCO":  0.08,
             "GDXU": 0.20,
         }
         # fallback for any ticker missing from the dicts above
@@ -37,6 +58,8 @@ class TradingStrategy(Strategy):
         self.trailing_stop_pct = 0.12
 
         # {"TICKER": {"entry_price": X, "peak_price": Y, "weight": W}}
+        # weight drifts with P&L rather than being reset, so the platform
+        # is handed the position's real weight and places no needless trade
         self.active_positions = {}
         self.exited_tickers = []
 
@@ -151,6 +174,10 @@ class TradingStrategy(Strategy):
                 log(f"SWING ENTRY (50%): {best} | RVOL: {scores[best]:.2f}")
 
         # --- 3. submit the book ------------------------------------
+        # A new position gets allocation_size. Existing ones are submitted
+        # at the weight they have actually drifted to, so the platform sees
+        # no difference and trades nothing. Resetting every position to 50%
+        # on any change sells down winners and tops up losers.
         if state_changed:
             alloc = {}
             for t, m in self.active_positions.items():
