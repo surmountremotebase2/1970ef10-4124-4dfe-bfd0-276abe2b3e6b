@@ -32,25 +32,24 @@ class TradingStrategy(Strategy):
         self.take_profit_pct = 0.25     # fallback
         self.trailing_stop_pct = 0.12   # fallback
 
-        # --- THEME GUARD -------------------------------------------
-        # Don't let both slots land in one theme. Two separate knobs:
+        # --- THEME GUARD: never hold two of the same theme ---------
+        # Measured, three independent years, full book:
+        #   guard off              12.92x   -44.9%   589 trades
+        #   selection only          7.38x   -44.9%   618   <- fails
+        #   BLOCK same theme       12.27x   -36.6%   676   <- this
         #
-        #   prefer_fresh_theme  = True  -> prefer a ticker whose theme is
-        #                                  not already held, even if
-        #                                  another scores higher on RVOL
-        #   same_theme_size     = size of a forced same-theme second
-        #                         position (0.0 refuses it outright)
-        #
-        # THE FOUR SETTINGS:
-        #   False / 0.50   guard OFF, original engine (the control)
-        #   True  / 0.50   selection only  <-- SET HERE
-        #   True  / 0.00   block same-theme entirely
-        #   True  / 0.25   same-theme allowed at half size
+        # "Selection only" still took a same-theme second position when
+        # nothing fresh was available -- it just picked the LOWER-RVOL
+        # name. All of the concentration risk, none of the better
+        # instrument. Blocking outright is what actually works, and it
+        # TRADES MORE, not less: leaving the slot empty frees it to catch
+        # a fresh-theme signal shortly after instead of being stuck in a
+        # duplicate position.
         self.themes = {"SOXL": "TECH", "TECL": "TECH",
                        "AGQ": "METAL", "GDXU": "METAL", "GDX": "METAL",
                        "UCO": "OIL"}
         self.prefer_fresh_theme = True
-        self.same_theme_size = 0.50
+        self.same_theme_size = 0.00
 
         self.active_positions = {}
         self.exited_tickers = []
