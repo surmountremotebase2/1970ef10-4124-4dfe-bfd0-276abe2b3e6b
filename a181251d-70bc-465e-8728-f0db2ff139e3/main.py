@@ -7,7 +7,7 @@ import numpy as np
 class TradingStrategy(Strategy):
 
     def __init__(self):
-        self.tickers = ["TECL", "SOXL", "AGQ", "UCO", "GDXU"]
+        self.tickers = ["TECL", "SOXL", "AGQ", "GDXU"]
 
         self.allocation_size = 0.50   # per position
         self.max_positions = 2
@@ -20,19 +20,16 @@ class TradingStrategy(Strategy):
         #   GDXU      20% / 20%      6.99x      -11.0%     -56.9%
         #   AGQ       30% / 12%      4.22x      +28.1%     -61.3%
         #   TECL      10% /  4%      3.87x      +48.4%     -41.0%
-        #   UCO        3% /  8%      1.83x       +6.5%     -37.5%
         self.take_profits = {
             "TECL": 0.10,
             "SOXL": 0.35,
             "AGQ":  0.30,
-            "UCO":  0.03,
             "GDXU": 0.20,
         }
         self.trailing_stops = {
             "TECL": 0.04,
             "SOXL": 0.08,
             "AGQ":  0.12,
-            "UCO":  0.08,
             "GDXU": 0.20,
         }
         # fallback for any ticker missing from the dicts above
