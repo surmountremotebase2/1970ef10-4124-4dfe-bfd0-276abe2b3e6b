@@ -14,22 +14,34 @@ class TradingStrategy(Strategy):
         self.vwap_len = 12
         self.rvol_threshold = 1.8
 
+        # --- EXITS, PER TICKER -------------------------------------
+        # GDXU changed from 20/20 to 25/12 on 2026-09-01.
+        # Across six years in the full book, every 12% stop variant beat
+        # the old 20/20 on compounded growth AND turned both losing years
+        # positive. 25/12 was best: 19.44x vs 12.73x, worst year +20.9%
+        # against -9.3%.
+        #
+        # WHAT THIS COSTS: GDXU tested ALONE strongly prefers the wide
+        # stop over 1 and 3 years (+148% vs +48%). The tight stop only
+        # wins inside the book, where an early exit frees the slot for
+        # another ticker instead of sitting in cash. In a pure metals
+        # melt-up this WILL leave money on the table.
         self.take_profits = {
             "TECL": 0.10,
             "SOXL": 0.35,
             "AGQ":  0.30,
             "UCO":  0.03,
-            "GDXU": 0.20,
+            "GDXU": 0.25,
         }
         self.trailing_stops = {
             "TECL": 0.04,
             "SOXL": 0.08,
             "AGQ":  0.12,
             "UCO":  0.08,
-            "GDXU": 0.20,
+            "GDXU": 0.12,
         }
-        self.take_profit_pct = 0.25
-        self.trailing_stop_pct = 0.12
+        self.take_profit_pct = 0.25     # fallback
+        self.trailing_stop_pct = 0.12   # fallback
 
         self.active_positions = {}
         self.exited_tickers = []
