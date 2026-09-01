@@ -9,7 +9,7 @@ class TradingStrategy(Strategy):
     def __init__(self):
         self.tickers = ["TECL", "SOXL", "AGQ", "UCO", "GDXU"]
 
-        self.allocation_size = 0.33   # INITIAL size only -- never re-imposed
+        self.allocation_size = 0.33
         self.max_positions = 3
         self.vwap_len = 12
         self.rvol_threshold = 1.8
@@ -28,20 +28,33 @@ class TradingStrategy(Strategy):
             "UCO":  0.08,
             "GDXU": 0.12,
         }
-        self.take_profit_pct = 0.25     # fallback
-        self.trailing_stop_pct = 0.12   # fallback
+        self.take_profit_pct = 0.25
+        self.trailing_stop_pct = 0.12
 
-        # virtual book: notional shares + cash, so weights come from
-        # PRICES and nothing depends on the platform reporting holdings
         self.active_positions = {}
-        self.cash = 1.0
         self.exited_tickers = []
 
-        # resubmit only when a weight actually moves more than this.
-        # Target is never more than 0.25% stale, so the most the platform
-        # can trim is 0.25% -- against the 2.60% seen live.
-        self.resubmit_tol = 0.0025
-        self.last_alloc = None
+        # --- DRIFT REFRESH -----------------------------------------
+        # The platform re-applies the last target it received on every
+        # bar. After an entry that target is 33%, so a position gets
+        # trimmed as it rises and topped up as it falls. Measured live:
+        # a 4.01% gain produced a 2.60% sell.
+        #
+        # This resends the standing target when the PLATFORM'S OWN
+        # reported weight has moved, using that reported number and
+        # never one the strategy calculates. An earlier attempt computed
+        # weights internally from bar closes; the model drifted from the
+        # real account and every refresh forced a correcting trade,
+        # taking turnover from 2.5 to 21 trades a day.
+        #
+        # Must sit BELOW the platform's own correction threshold or it
+        # never fires -- the trim happens first and there is nothing
+        # left to refresh.
+        #
+        # If `holdings` is not populated this never fires and the engine
+        # behaves exactly as it does today. Safe failure.
+        self.refresh_tol = 0.004
+        self.last_alloc = {}
 
     @property
     def interval(self):
@@ -56,17 +69,6 @@ class TradingStrategy(Strategy):
 
     def trailing_stop_for(self, ticker):
         return self.trailing_stops.get(ticker, self.trailing_stop_pct)
-
-    def _price(self, bar, ticker, fallback):
-        if ticker in bar and bar[ticker] and bar[ticker].get("close"):
-            return bar[ticker]["close"]
-        return fallback
-
-    def _book_value(self, bar):
-        v = self.cash
-        for t, m in self.active_positions.items():
-            v += m["shares"] * self._price(bar, t, m["last_price"])
-        return v if v > 0 else 1.0
 
     def get_conviction_score(self, history):
         if len(history) < 200:
@@ -86,71 +88,65 @@ class TradingStrategy(Strategy):
             return rvol
         return 0
 
+    def _observed_weight(self, ticker, holdings):
+        if not holdings:
+            return None
+        raw = holdings.get(ticker, None)
+        if raw is None:
+            return None
+        try:
+            w = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return w if 0.0 < w <= 1.0 else None
+
     def run(self, data):
         d = data.get("ohlcv")
         if not d:
             return None
-        bar = d[-1]
-        holdings = data.get("holdings", {}) or {}
+
+        holdings = data.get("holdings", {})
         self.exited_tickers = []
+        state_changed = False
         newly_entered = set()
 
-        # --- AMNESIA RECOVERY --------------------------------------
-        # A position the platform holds but the engine has forgotten is
-        # unmanaged: no take-profit and, far worse, NO TRAILING STOP.
-        for t in self.tickers:
-            if t in self.active_positions:
-                continue
-            try:
-                held = float(holdings.get(t, 0) or 0)
-            except (TypeError, ValueError):
-                held = 0.0
-            if held <= 0 or len(self.active_positions) >= self.max_positions:
-                continue
-            cp = self._price(bar, t, 0)
-            if not cp:
-                continue
-            total = self._book_value(bar)
-            value = min(held, 1.0) * total
-            self.active_positions[t] = {
-                "entry_price": cp,
-                "peak_price": cp,
-                "shares": value / cp,
-                "last_price": cp,
-            }
-            self.cash = max(self.cash - value, 0.0)
-            newly_entered.add(t)
-            log(f"AMNESIA RECOVERY: adopted untracked {t} at {cp}")
-
-        for t, m in self.active_positions.items():
-            m["last_price"] = self._price(bar, t, m["last_price"])
+        # bookkeeping only -- record what each position is really worth
+        for t in self.active_positions:
+            observed = self._observed_weight(t, holdings)
+            if observed is not None:
+                self.active_positions[t]["weight"] = observed
 
         # --- 1. manage what is held --------------------------------
         for t, m in list(self.active_positions.items()):
-            cp = self._price(bar, t, None)
-            if cp is None:
+            bar = d[-1].get(t)
+            if not bar:
                 continue
+            cp = bar["close"]
 
             if cp > m["peak_price"]:
-                m["peak_price"] = cp
+                self.active_positions[t]["peak_price"] = cp
 
             tp = self.take_profit_for(t)
-            st = self.trailing_stop_for(t)
-            hit_tp = cp >= m["entry_price"] * (1 + tp)
-            hit_st = cp <= m["peak_price"] * (1 - st)
-
-            if hit_tp or hit_st:
-                log(f"{'TAKE PROFIT' if hit_tp else 'SWING STOP'} "
-                    f"({tp if hit_tp else st:.0%}): {t} exit at {cp}.")
-                self.cash += m["shares"] * cp
+            if cp >= m["entry_price"] * (1 + tp):
+                log(f"TAKE PROFIT ({tp:.0%}): {t} exit at {cp}.")
                 self.exited_tickers.append(t)
                 del self.active_positions[t]
+                state_changed = True
+                continue
+
+            st = self.trailing_stop_for(t)
+            if cp <= m["peak_price"] * (1 - st):
+                log(f"SWING STOP ({st:.0%}): {t} exit at {cp}.")
+                self.exited_tickers.append(t)
+                del self.active_positions[t]
+                state_changed = True
+                continue
 
         # --- 2. pick at most one new position ----------------------
         if len(self.active_positions) < self.max_positions:
             scores = {}
             for t in self.tickers:
-                if t in self.active_positions or t in self.exited_tickers:
+                if t in self.active_positions:
                     continue
                 hist = [b[t] for b in d if t in b]
                 if hist:
@@ -160,49 +156,47 @@ class TradingStrategy(Strategy):
 
             if scores:
                 best = max(scores, key=scores.get)
-                cp = self._price(bar, best, None)
-                if cp:
-                    total = self._book_value(bar)
-                    value = min(self.allocation_size * total, self.cash)
-                    if value > 0:
-                        self.active_positions[best] = {
-                            "entry_price": cp,
-                            "peak_price": cp,
-                            "shares": value / cp,
-                            "last_price": cp,
-                        }
-                        self.cash -= value
-                        newly_entered.add(best)
-                        log(f"SWING ENTRY ({self.allocation_size:.0%}): "
-                            f"{best} | RVOL: {scores[best]:.2f}")
+                self.active_positions[best] = {
+                    "entry_price": d[-1][best]["close"],
+                    "peak_price": d[-1][best]["close"],
+                    "weight": self.allocation_size,
+                }
+                newly_entered.add(best)
+                state_changed = True
+                log(f"SWING ENTRY (33%): {best} | RVOL: {scores[best]:.2f}")
 
-        # --- 3. submit the REAL weights, THROTTLED -----------------
-        total = self._book_value(bar)
-        alloc = {t: 0.0 for t in self.tickers}
-        for t, m in self.active_positions.items():
-            alloc[t] = max(min(m["shares"] * m["last_price"] / total, 1.0), 0.0)
+        # --- 3. DRIFT REFRESH --------------------------------------
+        # Nothing opened or closed, but if the platform's own reported
+        # weights have moved away from the standing target, resend it so
+        # there is nothing left for the platform to correct.
+        if not state_changed and self.active_positions and self.last_alloc:
+            live = {}
+            for t in self.active_positions:
+                w = self._observed_weight(t, holdings)
+                if w is None:
+                    live = None
+                    break
+                live[t] = w
+            if live:
+                drift = max(abs(live[t] - self.last_alloc.get(t, 0.0))
+                            for t in live)
+                if drift >= self.refresh_tol:
+                    state_changed = True
 
-        tot = sum(alloc.values())
-        if tot > 1.0:
-            alloc = {t: w / tot for t, w in alloc.items()}
+        # --- 4. submit ---------------------------------------------
+        if state_changed:
+            alloc = {}
+            for t, m in self.active_positions.items():
+                alloc[t] = (self.allocation_size if t in newly_entered
+                            else m.get("weight", self.allocation_size))
+            total = sum(alloc.values())
+            if total > 1.0:
+                alloc = {t: w / total for t, w in alloc.items()}
+            self.last_alloc = dict(alloc)
+            # log only real entries and exits -- refreshes stay quiet
+            if newly_entered or self.exited_tickers:
+                log("ALLOC: " + ", ".join(f"{t} {w:.1%}"
+                                          for t, w in alloc.items()))
+            return TargetAllocation(alloc)
 
-        changed = bool(self.exited_tickers) or bool(newly_entered)
-        if self.last_alloc is None:
-            drift = 1.0
-        else:
-            drift = max(abs(alloc[t] - self.last_alloc.get(t, 0.0))
-                        for t in self.tickers)
-
-        # nothing opened or closed and the target is still accurate --
-        # stay silent so the platform keeps what it already has
-        if not changed and drift < self.resubmit_tol:
-            return None
-
-        self.last_alloc = dict(alloc)
-
-        # log only on a real entry or exit; drift refreshes stay silent
-        if changed:
-            held = ", ".join(f"{t} {w:.1%}" for t, w in alloc.items() if w > 0)
-            log("ALLOC: " + (held if held else "FLAT (all zero)"))
-
-        return TargetAllocation(alloc)
+        return None
