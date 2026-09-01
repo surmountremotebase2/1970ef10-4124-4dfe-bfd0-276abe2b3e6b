@@ -84,9 +84,6 @@ class TradingStrategy(Strategy):
             return None
 
         holdings = data.get("holdings", {})
-        self.exited_tickers = []
-        state_changed = False
-        newly_entered = set()
 
         # --- AMNESIA RECOVERY --------------------------------------
         # active_positions lives in memory and does not survive a
@@ -94,10 +91,16 @@ class TradingStrategy(Strategy):
         # has forgotten is UNMANAGED -- no take-profit and, far worse,
         # no trailing stop. Adopt it so the exit rules apply again.
         #
+        # MUST run before exited_tickers is cleared. That list is the
+        # settlement-lag guard: without it, a position closed one bar
+        # ago is still reported as held and gets re-adopted with a fresh
+        # peak, undoing the stop that just fired. Measured cost of that
+        # mistake: 372% -> 333% return, drawdown 37.7% -> 43.0%.
+        #
         # KNOWN LIMIT: adopts at the CURRENT price, so the peak resets.
-        # If the position already peaked higher and is falling, the stop
-        # measures from too low a point and fires later than it should.
-        # Better than no stop; not the same as never having forgotten.
+        # A position that already peaked higher gets a stop measured
+        # from too low a point. Better than no stop, not equivalent to
+        # never having forgotten.
         if holdings:
             for t in self.tickers:
                 if t in self.active_positions or t in self.exited_tickers:
@@ -122,7 +125,11 @@ class TradingStrategy(Strategy):
                 }
                 log(f"AMNESIA RECOVERY: adopted untracked {t} at {cp}")
 
-        # bookkeeping only -- record what each position is really worth
+        # clear the settlement-lag guard only AFTER recovery has used it
+        self.exited_tickers = []
+        state_changed = False
+        newly_entered = set()
+
         for t in self.active_positions:
             observed = self._observed_weight(t, holdings)
             if observed is not None:
