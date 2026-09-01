@@ -32,7 +32,7 @@ class TradingStrategy(Strategy):
         self.trailing_stop_pct = 0.12
 
         self.active_positions = {}
-        self.exited_tickers = []
+        self.ghost_cooldowns = {}
 
     @property
     def interval(self):
@@ -83,28 +83,48 @@ class TradingStrategy(Strategy):
         if not d:
             return None
 
-        # --- DATA SCRUBBER -----------------------------------------
-        # The platform does not reliably return uppercase keys in
-        # `holdings`. If they come back lowercase, holdings.get("TECL")
-        # returns None, _observed_weight silently fails, and every
-        # position falls back to allocation_size on the next submission
-        # -- which is the forced-rebalance bug the drifted-weight logic
-        # was written to prevent. It fails QUIETLY, which is why it can
-        # run for months unnoticed. Normalising the keys costs one line.
-        raw_holdings = data.get("holdings", {}) or {}
-        holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
-
-        self.exited_tickers = []
+        holdings = data.get("holdings", {})
         state_changed = False
         newly_entered = set()
 
-        # bookkeeping only -- record what each position is really worth
-        for t in self.active_positions:
-            observed = self._observed_weight(t, holdings)
-            if observed is not None:
-                self.active_positions[t]["weight"] = observed
+        # Step cooldowns down by 1 bar
+        for t in list(self.ghost_cooldowns.keys()):
+            self.ghost_cooldowns[t] -= 1
+            if self.ghost_cooldowns[t] <= 0:
+                del self.ghost_cooldowns[t]
 
-        # --- 1. manage what is held --------------------------------
+        # Case scrubber for the duplicate buy glitch
+        clean_holdings = {str(k).upper(): v for k, v in holdings.items()}
+
+        # 1. HYDRATE STATE: Cure amnesia and prevent forced rebalancing
+        for t, raw_weight in clean_holdings.items():
+            if t not in self.tickers:
+                continue
+            
+            # Settlement lag guard
+            if t in self.ghost_cooldowns:
+                continue
+                
+            observed = self._observed_weight(t, clean_holdings)
+            if observed is not None and observed > 0:
+                if t not in self.active_positions:
+                    # Max positions guard
+                    if len(self.active_positions) >= self.max_positions:
+                        continue
+                        
+                    bar = d[-1].get(t)
+                    if bar:
+                        cp = bar["close"]
+                        self.active_positions[t] = {
+                            "entry_price": cp,  
+                            "peak_price": cp,
+                            "weight": observed
+                        }
+                        log(f"AMNESIA RECOVERY: Re-tracking {t} at {cp} with weight {observed:.2%}")
+                else:
+                    self.active_positions[t]["weight"] = observed
+
+        # 2. MANAGE EXITS
         for t, m in list(self.active_positions.items()):
             bar = d[-1].get(t)
             if not bar:
@@ -117,7 +137,7 @@ class TradingStrategy(Strategy):
             tp = self.take_profit_for(t)
             if cp >= m["entry_price"] * (1 + tp):
                 log(f"TAKE PROFIT ({tp:.0%}): {t} exit at {cp}.")
-                self.exited_tickers.append(t)
+                self.ghost_cooldowns[t] = 3 # 2 bars observed lag + 1 buffer
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -125,12 +145,12 @@ class TradingStrategy(Strategy):
             st = self.trailing_stop_for(t)
             if cp <= m["peak_price"] * (1 - st):
                 log(f"SWING STOP ({st:.0%}): {t} exit at {cp}.")
-                self.exited_tickers.append(t)
+                self.ghost_cooldowns[t] = 3 # 2 bars observed lag + 1 buffer
                 del self.active_positions[t]
                 state_changed = True
                 continue
 
-        # --- 2. pick at most one new position ----------------------
+        # 3. MANAGE ENTRIES
         if len(self.active_positions) < self.max_positions:
             scores = {}
             for t in self.tickers:
@@ -153,18 +173,17 @@ class TradingStrategy(Strategy):
                 state_changed = True
                 log(f"SWING ENTRY (33%): {best} | RVOL: {scores[best]:.2f}")
 
-        # --- 3. submit only on a real entry or exit ----------------
-        # A new position gets allocation_size. Existing ones are
-        # submitted at the weight they have actually drifted to, so the
-        # platform sees no difference and trades nothing.
+        # 4. ALLOCATE
         if state_changed:
             alloc = {}
             for t, m in self.active_positions.items():
                 alloc[t] = (self.allocation_size if t in newly_entered
                             else m.get("weight", self.allocation_size))
+            
             total = sum(alloc.values())
             if total > 1.0:
                 alloc = {t: w / total for t, w in alloc.items()}
+                
             log("ALLOC: " + ", ".join(f"{t} {w:.1%}" for t, w in alloc.items()))
             return TargetAllocation(alloc)
 
