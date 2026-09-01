@@ -31,12 +31,17 @@ class TradingStrategy(Strategy):
         self.take_profit_pct = 0.25     # fallback
         self.trailing_stop_pct = 0.12   # fallback
 
-        # Virtual book: notional shares + cash as fractions of a 1.0
-        # account. Lets weights be computed from PRICES, with no
-        # dependence on the platform reporting holdings.
+        # virtual book: notional shares + cash, so weights come from
+        # PRICES and nothing depends on the platform reporting holdings
         self.active_positions = {}
         self.cash = 1.0
         self.exited_tickers = []
+
+        # resubmit only when a weight actually moves more than this.
+        # Target is never more than 0.25% stale, so the most the platform
+        # can trim is 0.25% -- against the 2.60% seen live.
+        self.resubmit_tol = 0.0025
+        self.last_alloc = None
 
     @property
     def interval(self):
@@ -81,18 +86,6 @@ class TradingStrategy(Strategy):
             return rvol
         return 0
 
-    def _observed_weight(self, ticker, holdings):
-        if not holdings:
-            return None
-        raw = holdings.get(ticker, None)
-        if raw is None:
-            return None
-        try:
-            w = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return w if 0.0 < w <= 1.0 else None
-
     def run(self, data):
         d = data.get("ohlcv")
         if not d:
@@ -100,10 +93,11 @@ class TradingStrategy(Strategy):
         bar = d[-1]
         holdings = data.get("holdings", {}) or {}
         self.exited_tickers = []
+        newly_entered = set()
 
         # --- AMNESIA RECOVERY --------------------------------------
-        # A position the platform holds but the engine has no record of
-        # is unmanaged: no take-profit and, far worse, NO TRAILING STOP.
+        # A position the platform holds but the engine has forgotten is
+        # unmanaged: no take-profit and, far worse, NO TRAILING STOP.
         for t in self.tickers:
             if t in self.active_positions:
                 continue
@@ -125,6 +119,7 @@ class TradingStrategy(Strategy):
                 "last_price": cp,
             }
             self.cash = max(self.cash - value, 0.0)
+            newly_entered.add(t)
             log(f"AMNESIA RECOVERY: adopted untracked {t} at {cp}")
 
         for t, m in self.active_positions.items():
@@ -177,22 +172,37 @@ class TradingStrategy(Strategy):
                             "last_price": cp,
                         }
                         self.cash -= value
+                        newly_entered.add(best)
                         log(f"SWING ENTRY ({self.allocation_size:.0%}): "
                             f"{best} | RVOL: {scores[best]:.2f}")
 
-        # --- 3. submit the REAL weights, EVERY bar -----------------
-        # This is what stops the platform rebalancing. The target always
-        # equals reality, so there is nothing for it to correct.
-        # Every ticker named explicitly so "flat" is never ambiguous.
+        # --- 3. submit the REAL weights, THROTTLED -----------------
         total = self._book_value(bar)
         alloc = {t: 0.0 for t in self.tickers}
         for t, m in self.active_positions.items():
             alloc[t] = max(min(m["shares"] * m["last_price"] / total, 1.0), 0.0)
 
-        s = sum(alloc.values())
-        if s > 1.0:
-            alloc = {t: w / s for t, w in alloc.items()}
+        tot = sum(alloc.values())
+        if tot > 1.0:
+            alloc = {t: w / tot for t, w in alloc.items()}
 
-        held = ", ".join(f"{t} {w:.1%}" for t, w in alloc.items() if w > 0)
-        log("ALLOC: " + (held if held else "FLAT (all zero)"))
+        changed = bool(self.exited_tickers) or bool(newly_entered)
+        if self.last_alloc is None:
+            drift = 1.0
+        else:
+            drift = max(abs(alloc[t] - self.last_alloc.get(t, 0.0))
+                        for t in self.tickers)
+
+        # nothing opened or closed and the target is still accurate --
+        # stay silent so the platform keeps what it already has
+        if not changed and drift < self.resubmit_tol:
+            return None
+
+        self.last_alloc = dict(alloc)
+
+        # log only on a real entry or exit; drift refreshes stay silent
+        if changed:
+            held = ", ".join(f"{t} {w:.1%}" for t, w in alloc.items() if w > 0)
+            log("ALLOC: " + (held if held else "FLAT (all zero)"))
+
         return TargetAllocation(alloc)
