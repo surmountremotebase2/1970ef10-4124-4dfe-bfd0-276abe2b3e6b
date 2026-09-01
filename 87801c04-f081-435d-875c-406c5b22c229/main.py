@@ -7,33 +7,30 @@ import numpy as np
 class TradingStrategy(Strategy):
 
     def __init__(self):
-        self.tickers = ["TECL", "SOXL", "AGQ", "UCO"]
+        self.tickers = ["TECL", "SOXL", "AGQ", "UCO", "GDXU"]
 
-        self.allocation_size = 0.50   # per position
-        self.max_positions = 2
-        self.vwap_len = 12            # bars, = 1 hour
+        self.allocation_size = 0.33
+        self.max_positions = 3
+        self.vwap_len = 12
         self.rvol_threshold = 1.8
 
-        # --- EXITS, PER TICKER -------------------------------------
         self.take_profits = {
-            "TECL": 0.25,
-            "SOXL": 0.25,
-            "AGQ":  0.25,
-            "UCO":  0.10,   # tested alone: both windows picked 10%
+            "TECL": 0.10,
+            "SOXL": 0.35,
+            "AGQ":  0.30,
+            "UCO":  0.03,
+            "GDXU": 0.25,
         }
         self.trailing_stops = {
-            "TECL": 0.12,
-            "SOXL": 0.12,
+            "TECL": 0.04,
+            "SOXL": 0.08,
             "AGQ":  0.12,
-            "UCO":  0.06,   # tested alone: both windows picked 6%
+            "UCO":  0.08,
+            "GDXU": 0.12,
         }
-        # fallback for any ticker missing from the dicts above
         self.take_profit_pct = 0.25
         self.trailing_stop_pct = 0.12
 
-        # {"TICKER": {"entry_price": X, "peak_price": Y, "weight": W}}
-        # weight drifts with P&L rather than being reset, so the platform
-        # is handed the position's real weight and places no needless trade
         self.active_positions = {}
         self.exited_tickers = []
 
@@ -70,11 +67,6 @@ class TradingStrategy(Strategy):
         return 0
 
     def _observed_weight(self, ticker, holdings):
-        """The position's ACTUAL weight now, as the platform reports it.
-
-        None when unavailable or not expressed as a fraction, in which case
-        the caller falls back to the weight tracked internally.
-        """
         if not holdings:
             return None
         raw = holdings.get(ticker, None)
@@ -96,7 +88,41 @@ class TradingStrategy(Strategy):
         state_changed = False
         newly_entered = set()
 
-        # --- bookkeeping only: record real weights, place no trades ---
+        # --- AMNESIA RECOVERY --------------------------------------
+        # active_positions lives in memory and does not survive a
+        # restart. A position the platform still holds but the engine
+        # has forgotten is UNMANAGED -- no take-profit and, far worse,
+        # no trailing stop. Adopt it so the exit rules apply again.
+        #
+        # KNOWN LIMIT: adopts at the CURRENT price, so the peak resets.
+        # If the position already peaked higher and is falling, the stop
+        # measures from too low a point and fires later than it should.
+        # Better than no stop; not the same as never having forgotten.
+        if holdings:
+            for t in self.tickers:
+                if t in self.active_positions or t in self.exited_tickers:
+                    continue
+                if len(self.active_positions) >= self.max_positions:
+                    break
+                try:
+                    held = float(holdings.get(t, 0) or 0)
+                except (TypeError, ValueError):
+                    held = 0.0
+                if held <= 0:
+                    continue
+                bar = d[-1].get(t)
+                if not bar:
+                    continue
+                cp = bar["close"]
+                w = self._observed_weight(t, holdings)
+                self.active_positions[t] = {
+                    "entry_price": cp,
+                    "peak_price": cp,
+                    "weight": w if w is not None else self.allocation_size,
+                }
+                log(f"AMNESIA RECOVERY: adopted untracked {t} at {cp}")
+
+        # bookkeeping only -- record what each position is really worth
         for t in self.active_positions:
             observed = self._observed_weight(t, holdings)
             if observed is not None:
@@ -149,13 +175,9 @@ class TradingStrategy(Strategy):
                 }
                 newly_entered.add(best)
                 state_changed = True
-                log(f"SWING ENTRY (50%): {best} | RVOL: {scores[best]:.2f}")
+                log(f"SWING ENTRY (33%): {best} | RVOL: {scores[best]:.2f}")
 
-        # --- 3. submit the book ------------------------------------
-        # A new position gets allocation_size. Existing ones are submitted
-        # at the weight they have actually drifted to, so the platform sees
-        # no difference and trades nothing. Resetting every position to 50%
-        # on any change sells down winners and tops up losers.
+        # --- 3. submit only on a real entry or exit ----------------
         if state_changed:
             alloc = {}
             for t, m in self.active_positions.items():
