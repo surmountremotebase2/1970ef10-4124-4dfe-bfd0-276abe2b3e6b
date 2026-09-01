@@ -34,6 +34,30 @@ class TradingStrategy(Strategy):
         self.active_positions = {}
         self.exited_tickers = []
 
+        # --- DRIFT REFRESH -----------------------------------------
+        # Surmount re-applies the last target it received on every bar,
+        # so after an entry it keeps forcing the position back to 33% --
+        # trimming it as it rises, buying more as it falls.
+        #
+        # This resends the standing target once the PLATFORM'S OWN
+        # reported weight has moved, using that reported number and never
+        # one the strategy calculates. An earlier attempt computed the
+        # weight internally from bar closes; the model diverged from the
+        # real account and every refresh forced a correcting trade,
+        # taking turnover from 2.7 to 21 trades a day.
+        #
+        # 0.008 is set from the live evidence: a 2.60% trim on a 33%
+        # position means the platform tolerates about 0.9 percentage
+        # points of drift before acting. Sitting just under that fires
+        # ahead of the trim without firing more often than necessary.
+        # An earlier run at 0.004 fired twice as often as needed and
+        # produced 11.38 trades a day.
+        #
+        # If `holdings` is empty this never fires and the engine behaves
+        # exactly as it does today. Safe failure.
+        self.refresh_tol = 0.008
+        self.last_alloc = {}
+
     @property
     def interval(self):
         return "5min"
@@ -143,7 +167,25 @@ class TradingStrategy(Strategy):
                 state_changed = True
                 log(f"SWING ENTRY (33%): {best} | RVOL: {scores[best]:.2f}")
 
-        # --- 3. submit only on a real entry or exit ----------------
+        # --- 3. DRIFT REFRESH --------------------------------------
+        # Nothing opened or closed, but if the platform's own reported
+        # weights have moved away from the standing target, resend it so
+        # there is nothing left for the platform to correct.
+        if not state_changed and self.active_positions and self.last_alloc:
+            live = {}
+            for t in self.active_positions:
+                w = self._observed_weight(t, holdings)
+                if w is None:
+                    live = None
+                    break
+                live[t] = w
+            if live:
+                drift = max(abs(live[t] - self.last_alloc.get(t, 0.0))
+                            for t in live)
+                if drift >= self.refresh_tol:
+                    state_changed = True
+
+        # --- 4. submit ---------------------------------------------
         if state_changed:
             alloc = {}
             for t, m in self.active_positions.items():
@@ -152,7 +194,11 @@ class TradingStrategy(Strategy):
             total = sum(alloc.values())
             if total > 1.0:
                 alloc = {t: w / total for t, w in alloc.items()}
-            log("ALLOC: " + ", ".join(f"{t} {w:.1%}" for t, w in alloc.items()))
+            self.last_alloc = dict(alloc)
+            # log only real entries and exits -- refreshes stay quiet
+            if newly_entered or self.exited_tickers:
+                log("ALLOC: " + ", ".join(f"{t} {w:.1%}"
+                                          for t, w in alloc.items()))
             return TargetAllocation(alloc)
 
         return None
