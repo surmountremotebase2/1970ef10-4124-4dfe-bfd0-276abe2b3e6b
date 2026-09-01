@@ -34,15 +34,6 @@ class TradingStrategy(Strategy):
         self.active_positions = {}
         self.exited_tickers = []
 
-        # Bars during which a just-exited ticker may NOT be re-adopted by
-        # amnesia recovery. Surmount keeps reporting a position in
-        # `holdings` for at least two bars after the exit fills, so a
-        # one-bar guard lets recovery buy back the very thing the stop
-        # just sold -- observed 23 times in one year, same price, ten
-        # minutes later. 12 bars is one hour.
-        self.exit_cooldown = {}
-        self.exit_cooldown_bars = 12
-
     @property
     def interval(self):
         return "5min"
@@ -92,52 +83,22 @@ class TradingStrategy(Strategy):
         if not d:
             return None
 
-        holdings = data.get("holdings", {})
-
-        # age the cooldown before recovery consults it
-        for _t in list(self.exit_cooldown):
-            self.exit_cooldown[_t] -= 1
-            if self.exit_cooldown[_t] <= 0:
-                del self.exit_cooldown[_t]
-
-        # --- AMNESIA RECOVERY --------------------------------------
-        # A position the platform holds but the engine has forgotten is
-        # UNMANAGED -- no take-profit, and far worse, no trailing stop.
-        # Adopt it so the exit rules apply again.
-        #
-        # The cooldown above is what makes this safe. Without it,
-        # recovery re-adopts a position the stop closed two bars earlier,
-        # undoing the exit at the same price.
-        if holdings:
-            for t in self.tickers:
-                if t in self.active_positions or t in self.exited_tickers:
-                    continue
-                if t in self.exit_cooldown:
-                    continue
-                if len(self.active_positions) >= self.max_positions:
-                    break
-                try:
-                    held = float(holdings.get(t, 0) or 0)
-                except (TypeError, ValueError):
-                    held = 0.0
-                if held <= 0:
-                    continue
-                bar = d[-1].get(t)
-                if not bar:
-                    continue
-                cp = bar["close"]
-                w = self._observed_weight(t, holdings)
-                self.active_positions[t] = {
-                    "entry_price": cp,
-                    "peak_price": cp,
-                    "weight": w if w is not None else self.allocation_size,
-                }
-                log(f"AMNESIA RECOVERY: adopted untracked {t} at {cp}")
+        # --- DATA SCRUBBER -----------------------------------------
+        # The platform does not reliably return uppercase keys in
+        # `holdings`. If they come back lowercase, holdings.get("TECL")
+        # returns None, _observed_weight silently fails, and every
+        # position falls back to allocation_size on the next submission
+        # -- which is the forced-rebalance bug the drifted-weight logic
+        # was written to prevent. It fails QUIETLY, which is why it can
+        # run for months unnoticed. Normalising the keys costs one line.
+        raw_holdings = data.get("holdings", {}) or {}
+        holdings = {str(k).upper(): v for k, v in raw_holdings.items()}
 
         self.exited_tickers = []
         state_changed = False
         newly_entered = set()
 
+        # bookkeeping only -- record what each position is really worth
         for t in self.active_positions:
             observed = self._observed_weight(t, holdings)
             if observed is not None:
@@ -157,7 +118,6 @@ class TradingStrategy(Strategy):
             if cp >= m["entry_price"] * (1 + tp):
                 log(f"TAKE PROFIT ({tp:.0%}): {t} exit at {cp}.")
                 self.exited_tickers.append(t)
-                self.exit_cooldown[t] = self.exit_cooldown_bars
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -166,7 +126,6 @@ class TradingStrategy(Strategy):
             if cp <= m["peak_price"] * (1 - st):
                 log(f"SWING STOP ({st:.0%}): {t} exit at {cp}.")
                 self.exited_tickers.append(t)
-                self.exit_cooldown[t] = self.exit_cooldown_bars
                 del self.active_positions[t]
                 state_changed = True
                 continue
@@ -195,6 +154,9 @@ class TradingStrategy(Strategy):
                 log(f"SWING ENTRY (33%): {best} | RVOL: {scores[best]:.2f}")
 
         # --- 3. submit only on a real entry or exit ----------------
+        # A new position gets allocation_size. Existing ones are
+        # submitted at the weight they have actually drifted to, so the
+        # platform sees no difference and trades nothing.
         if state_changed:
             alloc = {}
             for t, m in self.active_positions.items():
